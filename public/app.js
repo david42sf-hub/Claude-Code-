@@ -38,7 +38,11 @@ const fmtTime = (ts, withDate = true) => (ts ? new Date(ts).toLocaleString('es',
 }) : '—');
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: tz() }).format(new Date());
 
+// Funciones que dependen de dónde corre la app (servidor propio o página publicada).
+const feat = (name) => S.state?.features?.[name] ?? true;
+
 async function api(method, url, body) {
+  if (globalThis.LOCAL_BACKEND) return globalThis.LOCAL_BACKEND(method, url, body);
   const res = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && url !== '/api/login') { S.needLogin = true; render(); throw new Error('Inicia sesión.'); }
@@ -117,13 +121,15 @@ function render() {
   app.innerHTML = `<div class="shell">
     <aside class="side">
       <div class="brand">${LOGO}<span>Diario de trading</span></div>
-      <nav class="nav">${VIEWS.map(([k, l]) => `<a href="#/${k}" ${k === v ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
-      <div class="side-foot"><span>${esc(syncLine())}</span>
-        <button class="btn small" data-action="theme">Cambiar tema</button>
+      <nav class="nav">${VIEWS.map(([k, l]) => `<a href="#${k}" ${k === v ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
+      <div class="side-foot">${feat('sync') ? `<span>${esc(syncLine())}</span>` : ''}
+        ${feat('theme') ? '<button class="btn small" data-action="theme">Cambiar tema</button>' : ''}
         ${S.state.passwordProtected ? '<button class="btn small" data-action="logout">Cerrar sesión</button>' : ''}</div>
     </aside>
     <main class="main">
       <div class="top"><h1>${title}</h1>${showFilters ? filterBar() : ''}</div>
+      ${S.state.example ? '<div class="notice"><b>Datos de ejemplo.</b> Estas operaciones son inventadas para mostrar cómo funciona el diario. Desaparecen cuando <a href="#importar">importas tu CSV de Tradovate</a> o registras tu primera operación.</div>' : ''}
+      ${S.state.storageNote ? `<div class="notice warn">${esc(S.state.storageNote)}</div>` : ''}
       <div id="view"></div>
     </main></div>
     <dialog class="drawer" id="drawer"></dialog>`;
@@ -141,7 +147,7 @@ function loginView() {
 
 const emptyState = () => `<div class="card empty"><strong>Todavía no hay operaciones</strong>
   Importa el reporte de Tradovate o registra una operación manual para ver tus métricas.
-  <div style="margin-top:14px"><a class="btn primary" href="#/importar" style="text-decoration:none">Importar operaciones</a></div></div>`;
+  <div style="margin-top:14px"><a class="btn primary" href="#importar" style="text-decoration:none">Importar operaciones</a></div></div>`;
 const noMatch = () => '<div class="card empty"><strong>Sin operaciones en este filtro</strong>Cambia el periodo o los filtros para ver resultados.</div>';
 
 // ---------- panel ----------
@@ -158,7 +164,7 @@ function viewPanel(el) {
   const winMeter = s.winRate == null ? '' : `<div class="meter"><i style="width:${s.winRate * 100}%"></i><b></b></div>`;
   const unknown = [...new Set(list.filter((t) => t.unknownInstrument).map((t) => t.root))];
   el.innerHTML = `
-    ${unknown.length ? `<div class="notice warn">No conozco el valor por punto de <b>${esc(unknown.join(', '))}</b>; su resultado se calcula con valor 1. Corrígelo en <a href="#/ajustes">Ajustes</a>.</div>` : ''}
+    ${unknown.length ? `<div class="notice warn">No conozco el valor por punto de <b>${esc(unknown.join(', '))}</b>; su resultado se calcula con valor 1. Corrígelo en <a href="#ajustes">Ajustes</a>.</div>` : ''}
     ${open ? `<div class="notice">${open} posición(es) abierta(s) no se incluyen en las métricas hasta que se cierren.</div>` : ''}
     <div class="grid kpis">
       ${kpi('Resultado neto', `<span class="${cls(s.net)}">${money(s.net)}</span>`, `${s.count} operaciones · comisiones ${money(-s.fees, { sign: false })}`)}
@@ -295,7 +301,7 @@ function openDrawer(id) {
       <label class="field">Errores<input type="text" data-meta="mistakes" value="${esc(t.mistakes.join(', '))}" placeholder="p. ej. entrada tardía, sin plan"></label>
     </div>
     <label class="field">Notas<textarea data-meta="notes" placeholder="¿Qué viste? ¿Qué hiciste bien o mal?">${esc(t.notes)}</textarea></label>
-    <div><h3 style="margin-bottom:8px">Capturas</h3>
+    <div ${feat('shots') ? '' : 'hidden'}><h3 style="margin-bottom:8px">Capturas</h3>
       <div class="shots">${t.shots.map((s) => `<div class="shot"><a href="/uploads/${esc(s)}" target="_blank" rel="noopener"><img src="/uploads/${esc(s)}" alt="Captura de la operación" loading="lazy"></a>
         <button class="btn small" data-action="del-shot" data-shot="${esc(s)}" aria-label="Quitar captura">✕</button></div>`).join('')}</div>
       <label class="drop" style="margin-top:8px;padding:14px">Añadir captura (o pégala con Ctrl+V)<input type="file" accept="image/png,image/jpeg,image/webp" data-upload="shot" multiple></label></div>
@@ -385,6 +391,10 @@ function viewReports(el) {
 // ---------- importar ----------
 function syncCard() {
   const s = S.state.sync;
+  if (!feat('sync')) {
+    return `<div class="card"><h2>Sincronización automática con Tradovate</h2>
+      <p class="muted" style="margin:0">No está disponible en esta página: conectarse a la API de Tradovate requiere la versión con servidor propio. Aquí las operaciones entran por CSV o a mano.</p></div>`;
+  }
   if (!s.configured) {
     return `<div class="card"><h2>Sincronización automática con Tradovate</h2>
       <p class="muted" style="margin-top:0">Sin configurar. Cuando actives el complemento <b>API Access</b> en tu cuenta de Tradovate:</p>
@@ -454,7 +464,7 @@ function viewSettings(el) {
         <td class="r"><input type="number" step="any" min="0" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto"></td>
         <td class="r"><input type="number" step="any" min="0" value="0" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión"></td>
         <td><button class="btn small" data-action="save-inst">Añadir</button></td></tr></tbody></table></div></div>
-    <div class="card"><h2>Datos</h2><p class="muted" style="margin:0">${S.state.fills} ejecuciones guardadas en <code>data/diario.db</code> (SQLite) y capturas en <code>data/uploads</code>. Haz copia de la carpeta <code>data</code> para respaldar todo.</p></div></div>`;
+    <div class="card"><h2>Datos</h2><p class="muted" style="margin:0">${S.state.dataNote ? esc(S.state.dataNote) : `${S.state.fills} ejecuciones guardadas en <code>data/diario.db</code> (SQLite) y capturas en <code>data/uploads</code>. Haz copia de la carpeta <code>data</code> para respaldar todo.`}</p></div></div>`;
 }
 
 // ---------- eventos ----------
@@ -475,7 +485,7 @@ document.addEventListener('click', guard(async (ev) => {
     render();
   } else if (a === 'go-day') {
     S.filter = { ...S.filter, range: 'custom', from: el.dataset.day, to: el.dataset.day };
-    location.hash = '#/diario';
+    location.hash = "#diario";
   } else if (a === 'theme') {
     const next = (document.documentElement.dataset.theme || 'dark') === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
@@ -486,7 +496,11 @@ document.addEventListener('click', guard(async (ev) => {
     try { const r = await api('POST', '/api/sync'); toast(`Sincronización completa: ${r.added} ejecución(es) nueva(s).`); }
     finally { await reload(); }
   } else if (a === 'del-trade') {
-    if (!confirm('¿Eliminar esta operación y sus ejecuciones? No se puede deshacer.')) return;
+    if (!el.dataset.armed) {
+      el.dataset.armed = '1'; el.textContent = 'Confirmar: eliminar definitivamente';
+      setTimeout(() => { if (el.isConnected) { delete el.dataset.armed; el.textContent = 'Eliminar operación'; } }, 5000);
+      return;
+    }
     await api('DELETE', `/api/trades/${encodeURIComponent(S.openId)}`);
     S.openId = null; toast('Operación eliminada.'); await reload();
   } else if (a === 'del-shot') {

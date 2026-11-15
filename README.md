@@ -58,3 +58,7 @@ Una operación va de posición plana a posición plana, por cuenta y contrato, a
 ## Publicarla
 
 Para que sincronice sin tener tu computadora encendida, despliégala en un servidor con Node 22 y disco persistente para `data/`, detrás de HTTPS y con `APP_PASSWORD` definida.
+
+## Versión de una sola página
+
+`node scripts/build-artifact.mjs` genera `dist/diario-de-trading.html`: la misma interfaz sin servidor, con los datos guardados en el navegador o en el espacio de datos de la página donde se publique. No incluye sincronización con la API ni capturas de pantalla.
