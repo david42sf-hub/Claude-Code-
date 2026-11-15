@@ -38,6 +38,8 @@ const fmtTime = (ts, withDate = true) => (ts ? new Date(ts).toLocaleString('es',
 }) : '—');
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: tz() }).format(new Date());
 
+const currentTheme = () => (getComputedStyle(document.documentElement).colorScheme.includes('light') ? 'light' : 'dark');
+
 // Funciones que dependen de dónde corre la app (servidor propio o página publicada).
 const feat = (name) => S.state?.features?.[name] ?? true;
 
@@ -450,7 +452,11 @@ function viewSettings(el) {
   const used = new Set(S.trades.map((t) => t.root));
   const inst = [...S.state.instruments].sort((a, b) => (used.has(b.root) - used.has(a.root)) || a.root.localeCompare(b.root));
   const zones = [...new Set([tz(), 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Mexico_City', 'America/Bogota', 'America/Lima', 'America/Santiago', 'America/Argentina/Buenos_Aires', 'America/Caracas', 'Europe/Madrid', 'Europe/London', 'UTC'])];
+  const theme = currentTheme();
   el.innerHTML = `<div class="stack">
+    <div class="card"><h2>Apariencia</h2><div class="tabs" style="margin:0">
+      <button data-action="theme" data-value="dark" aria-pressed="${theme === 'dark'}" aria-selected="${theme === 'dark'}">Tema oscuro</button>
+      <button data-action="theme" data-value="light" aria-pressed="${theme === 'light'}" aria-selected="${theme === 'light'}">Tema claro</button></div></div>
     <div class="card"><h2>Zona horaria</h2><div class="row"><select id="set-tz">${zones.map((z) => `<option ${z === tz() ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select>
       <span class="muted">Define a qué día pertenece cada operación y cómo se leen las horas de los CSV.</span></div></div>
     <div class="card"><h2>Instrumentos y comisiones <small>la comisión es por contrato y por lado</small></h2>
@@ -487,8 +493,9 @@ document.addEventListener('click', guard(async (ev) => {
     S.filter = { ...S.filter, range: 'custom', from: el.dataset.day, to: el.dataset.day };
     location.hash = "#diario";
   } else if (a === 'theme') {
-    const next = (document.documentElement.dataset.theme || 'dark') === 'dark' ? 'light' : 'dark';
+    const next = el.dataset.value || (currentTheme() === 'dark' ? 'light' : 'dark');
     document.documentElement.dataset.theme = next;
+    if (view() === 'ajustes') render();
     try { localStorage.setItem('tema', next); } catch { /* sin almacenamiento */ }
   } else if (a === 'logout') { await api('POST', '/api/logout'); S.needLogin = true; render(); }
   else if (a === 'sync') {

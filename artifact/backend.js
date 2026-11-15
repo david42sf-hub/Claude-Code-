@@ -156,7 +156,7 @@ function state() {
   return {
     settings: { tz: mem.tz }, instruments: instrumentList(), days: usingExample() ? {} : mem.days,
     sync: { configured: false }, fills: mem.fills.length, passwordProtected: false, example: usingExample(),
-    features: { shots: false, sync: false, theme: false },
+    features: { shots: false, sync: false },
     storageNote: storage === 'db' ? '' : storage === 'local'
       ? 'No se pudo abrir tu espacio de datos en Claude, así que los cambios se guardan solo en este navegador.'
       : 'No hay dónde guardar en esta vista: los cambios se perderán al cerrar la página.',

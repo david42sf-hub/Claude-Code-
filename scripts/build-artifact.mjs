@@ -46,6 +46,9 @@ ${css}</style>
 <div id="app"></div>
 <div id="tip" class="tip" hidden></div>
 <div id="toast" class="toast" hidden role="status"></div>
+<script>
+try { const t = localStorage.getItem('tema'); if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t; } catch {}
+</script>
 <script type="module">
 const M = {};
 ${MODULES.map(wrap).join('\n\n')}
