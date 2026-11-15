@@ -1,0 +1,12 @@
+{
+  "name": "diario-de-trading",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Diario de trading personal para futuros (Tradovate): importación, métricas, calendario, reportes y sincronización automática.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  }
+}
