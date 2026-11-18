@@ -176,7 +176,7 @@ function viewPanel(el) {
   const unknown = [...new Set(list.filter((t) => t.unknownInstrument).map((t) => t.root))];
   const noFees = [...new Set(list.filter((t) => t.status === 'closed' && t.fees === 0).map((t) => t.root))];
   el.innerHTML = `
-    ${noFees.length ? `<div class="notice warn">Estas operaciones no descuentan comisiones (${esc(noFees.join(', '))}): su resultado neto es igual al bruto. Indica la comisión por contrato y por lado en <a href="#ajustes">Ajustes</a> y se recalcula todo.</div>` : ''}
+    ${noFees.length ? `<div class="notice warn">Estas operaciones no descuentan comisiones (${esc(noFees.join(', '))}): su resultado neto es igual al bruto. Indica la comisión por contrato en <a href="#ajustes">Ajustes</a> y se recalcula todo.</div>` : ''}
     ${unknown.length ? `<div class="notice warn">No conozco el valor por punto de <b>${esc(unknown.join(', '))}</b>; su resultado se calcula con valor 1. Corrígelo en <a href="#ajustes">Ajustes</a>.</div>` : ''}
     ${open ? `<div class="notice">${open} posición(es) abierta(s) no se incluyen en las métricas hasta que se cierren.</div>` : ''}
     <div class="grid kpis">
@@ -621,9 +621,12 @@ function viewSettings(el) {
       <button data-action="theme" data-value="light" aria-pressed="${theme === 'light'}" aria-selected="${theme === 'light'}">Tema claro</button></div></div>
     <div class="card"><h2>Zona horaria</h2><div class="row"><select id="set-tz">${zones.map((z) => `<option ${z === tz() ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select>
       <span class="muted">Define a qué día pertenece cada operación y cómo se leen las horas de los CSV.</span></div></div>
-    <div class="card"><h2>Instrumentos y comisiones <small>la comisión es por contrato y por lado</small></h2>
+    <div class="card"><h2>Instrumentos y comisiones <small>${S.state.settings.feeMode === 'side' ? 'comisión por contrato en cada lado' : 'comisión por contrato, una sola vez'}</small></h2>
       <p class="muted" style="margin-top:0">El reporte Performance de Tradovate no trae comisiones: indícalas aquí para que el resultado neto sea real. Con la sincronización por API se usan las comisiones exactas de cada ejecución.</p>
-      <div class="table-wrap"><table><thead><tr><th>Símbolo</th><th>Nombre</th><th class="r">Valor por punto ($)</th><th class="r">Comisión por lado ($)</th><th class="r">Contratos operados</th><th class="r">Comisiones descontadas</th><th></th></tr></thead>
+      <label class="field" style="max-width:420px;margin-bottom:12px">Cómo te cobra la comisión tu broker
+        <select id="set-fee-mode"><option value="round" ${S.state.settings.feeMode !== 'side' ? 'selected' : ''}>Por contrato, una sola vez (ida y vuelta)</option>
+          <option value="side" ${S.state.settings.feeMode === 'side' ? 'selected' : ''}>Por contrato en cada lado (entrada y salida)</option></select></label>
+      <div class="table-wrap"><table><thead><tr><th>Símbolo</th><th>Nombre</th><th class="r">Valor por punto ($)</th><th class="r">${S.state.settings.feeMode === 'side' ? 'Comisión por lado ($)' : 'Comisión por contrato ($)'}</th><th class="r">Contratos operados</th><th class="r">Comisiones descontadas</th><th></th></tr></thead>
       <tbody>${inst.map((i) => `<tr data-root="${esc(i.root)}"><td><b>${esc(i.root)}</b></td><td class="muted">${esc(i.name)}</td>
         <td class="r"><input type="number" step="any" min="0" value="${i.multiplier}" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto de ${esc(i.root)}"></td>
         <td class="r"><input type="number" step="any" min="0" value="${i.fee}" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión de ${esc(i.root)}"></td>
@@ -992,10 +995,11 @@ document.addEventListener('click', guard(async (ev) => {
     const root = $('#cal-root').value, total = Number($('#cal-total').value);
     const contracts = S.trades.filter((t) => t.status === 'closed' && t.root === root).reduce((n, t) => n + t.qty, 0);
     if (!(total > 0) || !contracts) { toast('Escribe el total que te cobró el broker.'); return; }
-    const perSide = Math.round((total / (2 * contracts)) * 10000) / 10000;
+    const sides = S.state.settings.feeMode === 'side' ? 2 : 1;
+    const perUnit = Math.round((total / (sides * contracts)) * 10000) / 10000;
     const input = $(`tr[data-root="${root}"] [data-inst=fee]`);
-    input.value = perSide; input.focus(); input.style.outline = '2px solid var(--accent)';
-    toast(`${root}: ${money(total, { sign: false })} entre ${contracts} contratos y 2 lados = $${perSide} por contrato y lado. Pulsa Guardar en su fila.`);
+    input.value = perUnit; input.focus(); input.style.outline = '2px solid var(--accent)';
+    toast(`${root}: ${money(total, { sign: false })} entre ${contracts} contratos${sides === 2 ? ' y 2 lados' : ''} = $${perUnit} por contrato${sides === 2 ? ' y lado' : ''}. Pulsa Guardar en su fila.`);
   }
   else if (a === 'del-selected') {
     const n = S.sel.size;
@@ -1052,6 +1056,12 @@ document.addEventListener('change', guard(async (ev) => {
     await saveMeta('followed', ids);
   } else if (el.dataset.aiToggle) { S.ai[el.dataset.aiToggle] = el.checked; render(); }
   else if (el.dataset.news === 'country') { S.news.country = el.value; render(); }
+  else if (el.id === 'set-fee-mode') {
+    S.state = await api('PUT', '/api/settings', { feeMode: el.value });
+    S.trades = await api('GET', '/api/trades');
+    toast(el.value === 'round' ? 'Las comisiones se cobran una vez por contrato. Resultados recalculados.' : 'Las comisiones se cobran en cada lado. Resultados recalculados.');
+    render();
+  }
   else if (el.dataset.calc) { S.calc[el.dataset.calc] = el.value; const o = $('#calc-out'); if (o) o.innerHTML = calcResult(); }
 }));
 

@@ -41,7 +41,7 @@ Copia `.env.example` a `.env` y completa lo que necesites. El archivo `.env` nun
 
 1. En Tradovate descarga el reporte **Performance** o **Fills** en CSV.
 2. Súbelo en la pantalla **Importar**.
-3. En **Ajustes** indica la comisión por contrato y por lado de cada instrumento: el reporte Performance no trae comisiones, y sin ellas el resultado neto sería igual al bruto.
+3. En **Ajustes** indica la comisión por contrato de cada instrumento (y si tu broker la cobra una vez por contrato o en cada lado): el reporte Performance no trae comisiones, y sin ellas el resultado neto sería igual al bruto.
 
 Las horas del CSV se interpretan en la zona horaria elegida en Ajustes (por defecto `America/New_York`).
 

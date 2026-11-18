@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS instruments (
 );
 `;
 
-const DEFAULT_SETTINGS = { tz: 'America/New_York' };
+// feeMode: 'round' = la comisión es por contrato, una sola vez (ida y vuelta); 'side' = se cobra en cada lado (entrada y salida)
+const DEFAULT_SETTINGS = { tz: 'America/New_York', feeMode: 'round' };
 
 export class Store {
   constructor(file) {
@@ -45,6 +46,7 @@ export class Store {
     const out = { ...DEFAULT_SETTINGS };
     for (const r of this.db.prepare('SELECT key, value FROM settings').all()) out[r.key] = JSON.parse(r.value);
     delete out.imports;
+    if (out.feeMode !== 'side') out.feeMode = 'round';
     out.rules = normalizeRules(out.rules);
     out.playbooks = normalizePlaybooks(out.playbooks);
     return out;
@@ -54,6 +56,10 @@ export class Store {
     if (patch.tz !== undefined) {
       if (!isValidTz(patch.tz)) throw new Error('Zona horaria no válida.');
       put.run('tz', JSON.stringify(patch.tz));
+    }
+    if (patch.feeMode !== undefined) {
+      if (!['side', 'round'].includes(patch.feeMode)) throw new Error('Modo de comisión no válido.');
+      put.run('feeMode', JSON.stringify(patch.feeMode));
     }
     if (patch.rules !== undefined) put.run('rules', JSON.stringify(normalizeRules(patch.rules)));
     if (patch.playbooks !== undefined) put.run('playbooks', JSON.stringify(normalizePlaybooks(patch.playbooks)));
@@ -184,7 +190,9 @@ export class Store {
   trades() {
     if (this.cache) return this.cache;
     const fills = this.db.prepare('SELECT * FROM fills').all();
-    const inst = new Map(this.instruments().map((i) => [i.root, i]));
+    // el motor cobra la comisión en cada lado: si es por contrato ida y vuelta, se reparte a medias
+    const half = this.settings().feeMode === 'round' ? 0.5 : 1;
+    const inst = new Map(this.instruments().map((i) => [i.root, { ...i, fee: i.fee * half }]));
     const built = buildTrades(fills, inst, this.settings().tz);
     const meta = new Map(this.db.prepare('SELECT * FROM trade_meta').all().map((m) => [m.trade_id, m]));
     this.cache = built.map((t) => {

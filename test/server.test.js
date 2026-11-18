@@ -44,11 +44,16 @@ test('importar, anotar, reimportar sin duplicar y borrar', async () => {
     r = await app.call('PUT', `/api/trades/${es.id}/meta`, { notes: 'Entré tarde', strategy: 'Ruptura', tags: ['A+', 'A+', ' '], stop: 4995 });
     assert.deepEqual([r.body.notes, r.body.strategy, r.body.tags, r.body.stop], ['Entré tarde', 'Ruptura', ['A+'], 4995]);
 
-    // la comisión configurada se aplica a las operaciones ya importadas
+    // la comisión configurada se aplica a las operaciones ya importadas (por defecto: por contrato, una sola vez)
     await app.call('PUT', '/api/instruments/ES', { multiplier: 50, fee: 1.5 });
     r = await app.call('GET', '/api/trades');
     const es2 = r.body.find((t) => t.root === 'ES');
-    assert.deepEqual([es2.fees, es2.net, es2.notes], [6, -1006, 'Entré tarde']);
+    assert.deepEqual([es2.fees, es2.net, es2.notes], [3, -1003, 'Entré tarde']);          // 2 contratos × 1.5
+    // si el broker cobra en cada lado, se cobra en entrada y salida
+    assert.equal((await app.call('PUT', '/api/settings', { feeMode: 'mal' })).status, 400);
+    assert.equal((await app.call('PUT', '/api/settings', { feeMode: 'side' })).body.settings.feeMode, 'side');
+    assert.equal((await app.call('GET', '/api/trades')).body.find((t) => t.root === 'ES').fees, 6);   // 2 contratos × 2 lados × 1.5
+    await app.call('PUT', '/api/settings', { feeMode: 'round' });
 
     const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
     r = await app.call('POST', `/api/trades/${es.id}/shots`, { dataUrl: png });

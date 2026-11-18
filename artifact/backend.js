@@ -11,7 +11,7 @@ import { normalizePlaybooks } from '../public/lib/playbooks.js';
 const CHUNK = 1200;
 const LS_KEY = 'diario-de-trading';
 
-const mem = { tz: 'America/New_York', rules: normalizeRules(), instruments: {}, playbooks: [], fills: [], meta: {}, days: {}, imports: [] };
+const mem = { tz: 'America/New_York', feeMode: 'round', rules: normalizeRules(), instruments: {}, playbooks: [], fills: [], meta: {}, days: {}, imports: [] };
 let col = null;            // colección privada del usuario en la base de datos
 let storage = 'none';      // 'db' | 'local' | 'none'
 let chunksSaved = 0;
@@ -41,7 +41,7 @@ function write(id, body) {
   queues.set(id, next);
   return next;
 }
-const saveConfig = () => write('config', { tz: mem.tz, rules: mem.rules, instruments: mem.instruments, playbooks: mem.playbooks, imports: mem.imports });
+const saveConfig = () => write('config', { tz: mem.tz, feeMode: mem.feeMode, rules: mem.rules, instruments: mem.instruments, playbooks: mem.playbooks, imports: mem.imports });
 const saveMeta = () => write('meta', { byId: mem.meta });
 const saveDays = () => write('days', { notes: mem.days });
 async function saveFills() {
@@ -59,6 +59,7 @@ function absorb(docs) {
   for (const [id, d] of docs) {
     if (id === 'config') {
       if (isValidTz(d.tz)) mem.tz = d.tz;
+      mem.feeMode = d.feeMode === 'side' ? 'side' : 'round';
       mem.rules = normalizeRules(d.rules); mem.instruments = d.instruments || {}; mem.playbooks = normalizePlaybooks(d.playbooks);
       mem.imports = Array.isArray(d.imports) ? d.imports : [];
     } else if (id === 'meta') mem.meta = d.byId || {};
@@ -98,7 +99,9 @@ async function init() {
 // ---------- operaciones ----------
 function trades() {
   if (cache) return cache;
-  const inst = new Map(instrumentList().map((i) => [i.root, i]));
+  // el motor cobra la comisión en cada lado: si es por contrato ida y vuelta, se reparte a medias
+  const half = mem.feeMode === 'side' ? 1 : 0.5;
+  const inst = new Map(instrumentList().map((i) => [i.root, { ...i, fee: i.fee * half }]));
   cache = buildTrades(mem.fills, inst, mem.tz).map((t) => {
     const m = mem.meta[t.id] || {};
     return {
@@ -127,7 +130,7 @@ function importList() {
 
 function state() {
   return {
-    settings: { tz: mem.tz, rules: mem.rules, playbooks: mem.playbooks }, instruments: instrumentList(), days: mem.days,
+    settings: { tz: mem.tz, feeMode: mem.feeMode === 'side' ? 'side' : 'round', rules: mem.rules, playbooks: mem.playbooks }, instruments: instrumentList(), days: mem.days,
     sync: { configured: false }, fills: mem.fills.length, passwordProtected: false, imports: importList(),
     features: { shots: false, sync: false, economicConsent: true },
     storageNote: storage === 'db' ? '' : storage === 'local'
@@ -270,6 +273,10 @@ async function handle(method, url, body = {}) {
     if (body.tz !== undefined) {
       if (!isValidTz(body.tz)) fail('Zona horaria no válida.');
       mem.tz = body.tz; cache = null;
+    }
+    if (body.feeMode !== undefined) {
+      if (!['side', 'round'].includes(body.feeMode)) fail('Modo de comisión no válido.');
+      mem.feeMode = body.feeMode; cache = null;
     }
     if (body.rules !== undefined) mem.rules = normalizeRules(body.rules);
     if (body.playbooks !== undefined) mem.playbooks = normalizePlaybooks(body.playbooks);
