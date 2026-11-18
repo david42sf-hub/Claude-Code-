@@ -610,6 +610,9 @@ async function importFiles(files) {
 // ---------- ajustes ----------
 function viewSettings(el) {
   const inst = [...S.state.instruments].sort((a, b) => a.root.localeCompare(b.root));
+  const used = {};
+  for (const t of S.trades) if (t.status === 'closed') { const u = (used[t.root] ||= { contracts: 0, fees: 0, gross: 0 }); u.contracts += t.qty; u.fees += t.fees; u.gross += t.gross; }
+  const withTrades = inst.filter((i) => used[i.root]);
   const zones = [...new Set([tz(), 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Mexico_City', 'America/Bogota', 'America/Lima', 'America/Santiago', 'America/Argentina/Buenos_Aires', 'America/Caracas', 'Europe/Madrid', 'Europe/London', 'UTC'])];
   const theme = currentTheme();
   el.innerHTML = `<div class="stack">
@@ -620,15 +623,22 @@ function viewSettings(el) {
       <span class="muted">Define a qué día pertenece cada operación y cómo se leen las horas de los CSV.</span></div></div>
     <div class="card"><h2>Instrumentos y comisiones <small>la comisión es por contrato y por lado</small></h2>
       <p class="muted" style="margin-top:0">El reporte Performance de Tradovate no trae comisiones: indícalas aquí para que el resultado neto sea real. Con la sincronización por API se usan las comisiones exactas de cada ejecución.</p>
-      <div class="table-wrap"><table><thead><tr><th>Símbolo</th><th>Nombre</th><th class="r">Valor por punto ($)</th><th class="r">Comisión ($)</th><th></th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th>Símbolo</th><th>Nombre</th><th class="r">Valor por punto ($)</th><th class="r">Comisión por lado ($)</th><th class="r">Contratos operados</th><th class="r">Comisiones descontadas</th><th></th></tr></thead>
       <tbody>${inst.map((i) => `<tr data-root="${esc(i.root)}"><td><b>${esc(i.root)}</b></td><td class="muted">${esc(i.name)}</td>
         <td class="r"><input type="number" step="any" min="0" value="${i.multiplier}" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto de ${esc(i.root)}"></td>
         <td class="r"><input type="number" step="any" min="0" value="${i.fee}" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión de ${esc(i.root)}"></td>
+        <td class="r num">${used[i.root] ? num(used[i.root].contracts, 0) : '—'}</td><td class="r num">${used[i.root] ? money(-used[i.root].fees, { sign: false }) : '—'}</td>
         <td><button class="btn small" data-action="save-inst">Guardar</button></td></tr>`).join('')}
         <tr data-root=""><td><input type="text" placeholder="Nuevo símbolo" data-inst="root" style="width:120px" aria-label="Nuevo símbolo"></td><td></td>
         <td class="r"><input type="number" step="any" min="0" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto"></td>
-        <td class="r"><input type="number" step="any" min="0" value="0" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión"></td>
-        <td><button class="btn small" data-action="save-inst">Añadir</button></td></tr></tbody></table></div></div>
+        <td class="r"><input type="number" step="any" min="0" value="0" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión"></td><td></td><td></td>
+        <td><button class="btn small" data-action="save-inst">Añadir</button></td></tr></tbody></table></div>
+      ${withTrades.length ? `<div style="margin-top:16px"><h3 style="margin-bottom:6px">Calcular la comisión real con lo que te cobró el broker</h3>
+        <p class="muted" style="margin:0 0 8px">Mira en el extracto de Tradovate el total de comisiones y tasas que pagaste por un instrumento en el periodo que has importado y escríbelo aquí. La app calcula la cifra por contrato y por lado y la deja en la tabla para que la guardes. Compara también el <b>resultado bruto</b> con el de tu broker: si el bruto ya no coincide, la diferencia no está en las comisiones.</p>
+        <div class="row"><select id="cal-root" aria-label="Instrumento">${withTrades.map((i) => `<option>${esc(i.root)}</option>`).join('')}</select>
+          <input type="number" id="cal-total" min="0" step="any" placeholder="Total cobrado ($)" style="width:160px" aria-label="Total cobrado por el broker">
+          <button class="btn" data-action="calib">Calcular</button></div>
+        <div class="muted num" style="margin-top:8px">${withTrades.map((i) => `${esc(i.root)}: bruto ${money(used[i.root].gross)}`).join(' · ')} · total ${money(withTrades.reduce((a, i) => a + used[i.root].gross, 0))}</div></div>` : ''}</div>
     <div class="card"><h2>Datos</h2><p class="muted" style="margin-top:0">${S.state.dataNote ? esc(S.state.dataNote) : `${S.state.fills} ejecuciones guardadas en <code>data/diario.db</code> (SQLite) y capturas en <code>data/uploads</code>. Haz copia de la carpeta <code>data</code> para respaldar todo.`}</p>
       <div class="row" style="margin-top:12px"><button class="btn danger" data-action="wipe">Borrar todos los datos</button>
         <span class="muted">Elimina operaciones, notas, capturas, playbooks y los instrumentos detectados al importar. Conserva la zona horaria, tus reglas y las comisiones de NQ y MNQ.</span></div></div></div>`;
@@ -978,6 +988,15 @@ document.addEventListener('click', guard(async (ev) => {
     S.pbDraft = null; S.pbSel = null; S.pbNew = false; toast('Playbook eliminado.'); render();
   } else if (a === 'sel-filtered') { for (const t of filtered()) S.sel.add(t.id); render(); }
   else if (a === 'sel-clear') { S.sel.clear(); render(); }
+  else if (a === 'calib') {
+    const root = $('#cal-root').value, total = Number($('#cal-total').value);
+    const contracts = S.trades.filter((t) => t.status === 'closed' && t.root === root).reduce((n, t) => n + t.qty, 0);
+    if (!(total > 0) || !contracts) { toast('Escribe el total que te cobró el broker.'); return; }
+    const perSide = Math.round((total / (2 * contracts)) * 10000) / 10000;
+    const input = $(`tr[data-root="${root}"] [data-inst=fee]`);
+    input.value = perSide; input.focus(); input.style.outline = '2px solid var(--accent)';
+    toast(`${root}: ${money(total, { sign: false })} entre ${contracts} contratos y 2 lados = $${perSide} por contrato y lado. Pulsa Guardar en su fila.`);
+  }
   else if (a === 'del-selected') {
     const n = S.sel.size;
     if (!armed(el, `Confirmar: eliminar ${n} ${n === 1 ? 'operación' : 'operaciones'} para siempre`)) return;
