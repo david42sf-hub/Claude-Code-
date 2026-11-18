@@ -616,25 +616,30 @@ function viewSettings(el) {
   const zones = [...new Set([tz(), 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Mexico_City', 'America/Bogota', 'America/Lima', 'America/Santiago', 'America/Argentina/Buenos_Aires', 'America/Caracas', 'Europe/Madrid', 'Europe/London', 'UTC'])];
   const theme = currentTheme();
   el.innerHTML = `<div class="stack">
+    <div class="card"><h2>Comisiones <small>se descuentan solas de cada operación</small></h2>
+      <form data-form="fees" class="stack">
+        <label class="field" style="max-width:440px">Cómo te cobra la comisión tu broker
+          <select name="feeMode"><option value="round" ${S.state.settings.feeMode !== 'side' ? 'selected' : ''}>Por contrato, una sola vez (ida y vuelta)</option>
+            <option value="side" ${S.state.settings.feeMode === 'side' ? 'selected' : ''}>Por contrato en cada lado (entrada y salida)</option></select></label>
+        <div class="form-grid">${inst.map((i) => `<label class="field">Comisión por contrato en ${esc(i.root)} ($)
+          <input type="text" inputmode="decimal" id="fee-${esc(i.root)}" name="fee_${esc(i.root)}" value="${i.fee}" autocomplete="off"></label>`).join('')}</div>
+        <div class="muted num">${withTrades.length ? `Ahora descuentas ${money(withTrades.reduce((a, i) => a + used[i.root].fees, 0), { sign: false })} en total: ${withTrades.map((i) => `${num(used[i.root].contracts, 0)} contratos de ${esc(i.root)}`).join(' y ')}.` : 'Aún no hay operaciones.'}</div>
+        <div><button class="btn primary">Guardar comisiones</button></div></form></div>
     <div class="card"><h2>Apariencia</h2><div class="tabs" style="margin:0">
       <button data-action="theme" data-value="dark" aria-pressed="${theme === 'dark'}" aria-selected="${theme === 'dark'}">Tema oscuro</button>
       <button data-action="theme" data-value="light" aria-pressed="${theme === 'light'}" aria-selected="${theme === 'light'}">Tema claro</button></div></div>
     <div class="card"><h2>Zona horaria</h2><div class="row"><select id="set-tz">${zones.map((z) => `<option ${z === tz() ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select>
       <span class="muted">Define a qué día pertenece cada operación y cómo se leen las horas de los CSV.</span></div></div>
-    <div class="card"><h2>Instrumentos y comisiones <small>${S.state.settings.feeMode === 'side' ? 'comisión por contrato en cada lado' : 'comisión por contrato, una sola vez'}</small></h2>
-      <p class="muted" style="margin-top:0">El reporte Performance de Tradovate no trae comisiones: indícalas aquí para que el resultado neto sea real. Al cambiar un valor se guarda solo y se recalcula todo el historial. Con la sincronización por API se usan las comisiones exactas de cada ejecución.</p>
-      <label class="field" style="max-width:420px;margin-bottom:12px">Cómo te cobra la comisión tu broker
-        <select id="set-fee-mode"><option value="round" ${S.state.settings.feeMode !== 'side' ? 'selected' : ''}>Por contrato, una sola vez (ida y vuelta)</option>
-          <option value="side" ${S.state.settings.feeMode === 'side' ? 'selected' : ''}>Por contrato en cada lado (entrada y salida)</option></select></label>
-      <div class="table-wrap"><table><thead><tr><th>Símbolo</th><th class="r">Valor por punto ($)</th><th class="r">${S.state.settings.feeMode === 'side' ? 'Comisión por lado ($)' : 'Comisión por contrato ($)'}</th><th class="r">Contratos operados</th><th class="r">Comisiones descontadas</th><th></th></tr></thead>
+    <div class="card"><h2>Instrumentos <small>valor por punto de cada contrato</small></h2>
+      <p class="muted" style="margin-top:0">El valor por punto define cuánto vale cada punto de movimiento. Se guarda solo al cambiarlo. Las comisiones se cambian en el formulario de arriba.</p>
+      <div class="table-wrap"><table><thead><tr><th>Símbolo</th><th class="r">Valor por punto ($)</th><th class="r">Contratos operados</th><th class="r">Comisiones descontadas</th><th></th></tr></thead>
       <tbody>${inst.map((i) => `<tr data-root="${esc(i.root)}"><td><b>${esc(i.root)}</b>${i.name ? `<div class="muted" style="font-size:11px;white-space:normal">${esc(i.name)}</div>` : ''}</td>
         <td class="r"><input type="number" step="any" min="0" value="${i.multiplier}" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto de ${esc(i.root)}"></td>
-        <td class="r"><input type="number" step="any" min="0" value="${i.fee}" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión de ${esc(i.root)}"></td>
         <td class="r num">${used[i.root] ? num(used[i.root].contracts, 0) : '—'}</td><td class="r num">${used[i.root] ? money(-used[i.root].fees, { sign: false }) : '—'}</td>
         <td><button class="btn small" data-action="save-inst">Guardar</button></td></tr>`).join('')}
         <tr data-root=""><td><input type="text" placeholder="Nuevo símbolo" data-inst="root" style="width:120px" aria-label="Nuevo símbolo"></td>
         <td class="r"><input type="number" step="any" min="0" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto"></td>
-        <td class="r"><input type="number" step="any" min="0" value="0" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión"></td><td></td><td></td>
+        <td></td><td></td>
         <td><button class="btn small" data-action="save-inst">Añadir</button></td></tr></tbody></table></div>
       ${withTrades.length ? `<div style="margin-top:16px"><h3 style="margin-bottom:6px">Calcular la comisión real con lo que te cobró el broker</h3>
         <p class="muted" style="margin:0 0 8px">Mira en el extracto de Tradovate el total de comisiones y tasas que pagaste por un instrumento en el periodo que has importado y escríbelo aquí. La app calcula la cifra por contrato y por lado y la deja en la tabla para que la guardes. Compara también el <b>resultado bruto</b> con el de tu broker: si el bruto ya no coincide, la diferencia no está en las comisiones.</p>
@@ -957,7 +962,7 @@ document.addEventListener('click', guard(async (ev) => {
     const row = el.closest('tr');
     const root = row.dataset.root || $('[data-inst=root]', row).value;
     S.state = await api('PUT', `/api/instruments/${encodeURIComponent(root.trim().toUpperCase())}`, {
-      multiplier: $('[data-inst=multiplier]', row).value, fee: $('[data-inst=fee]', row).value,
+      multiplier: $('[data-inst=multiplier]', row).value, fee: $('[data-inst=fee]', row)?.value ?? (S.state.instruments.find((i) => i.root === root.trim().toUpperCase())?.fee ?? 0),
     });
     S.trades = await api('GET', '/api/trades');
     toast(`${root.toUpperCase()} guardado. Los resultados se recalcularon.`); render();
@@ -997,9 +1002,9 @@ document.addEventListener('click', guard(async (ev) => {
     if (!(total > 0) || !contracts) { toast('Escribe el total que te cobró el broker.'); return; }
     const sides = S.state.settings.feeMode === 'side' ? 2 : 1;
     const perUnit = Math.round((total / (sides * contracts)) * 10000) / 10000;
-    const input = $(`tr[data-root="${root}"] [data-inst=fee]`);
-    input.value = perUnit; input.focus(); input.style.outline = '2px solid var(--accent)';
-    toast(`${root}: ${money(total, { sign: false })} entre ${contracts} contratos${sides === 2 ? ' y 2 lados' : ''} = $${perUnit} por contrato${sides === 2 ? ' y lado' : ''}. Pulsa Guardar en su fila.`);
+    const input = $(`#fee-${root}`);
+    input.value = perUnit; input.scrollIntoView({ block: 'center' }); input.focus(); input.style.outline = '2px solid var(--accent)';
+    toast(`${root}: ${money(total, { sign: false })} entre ${contracts} contratos${sides === 2 ? ' y 2 lados' : ''} = $${perUnit} por contrato${sides === 2 ? ' y lado' : ''}. Pulsa Guardar comisiones.`);
   }
   else if (a === 'del-selected') {
     const n = S.sel.size;
@@ -1059,12 +1064,10 @@ document.addEventListener('change', guard(async (ev) => {
   else if (el.dataset.inst && el.closest('tr')?.dataset.root) {
     // instrumentos existentes: se guardan al cambiar el valor (sin botón ni recargar la tabla)
     const row = el.closest('tr'), root = row.dataset.root;
-    const multiplier = $('[data-inst=multiplier]', row).value, fee = $('[data-inst=fee]', row).value;
+    const multiplier = $('[data-inst=multiplier]', row).value, fee = S.state.instruments.find((i) => i.root === root)?.fee ?? 0;
     S.state = await api('PUT', `/api/instruments/${encodeURIComponent(root)}`, { multiplier, fee });
     S.trades = await api('GET', '/api/trades');
-    const u = S.trades.filter((t) => t.status === 'closed' && t.root === root).reduce((a, t) => a + t.fees, 0);
-    if (row.children[3]) row.children[3].textContent = money(-u, { sign: false });
-    toast(`${root} guardado: comisión $${fee} por contrato. Resultados recalculados.`);
+    toast(`${root} guardado. Resultados recalculados.`);
   }
   else if (el.id === 'set-fee-mode') {
     S.state = await api('PUT', '/api/settings', { feeMode: el.value });
@@ -1109,6 +1112,18 @@ document.addEventListener('submit', guard(async (ev) => {
   if (form.dataset.form === 'login') {
     try { await api('POST', '/api/login', data); } catch (e) { toast(e.message); return; }
     await reload();
+  } else if (form.dataset.form === 'fees') {
+    for (const i of S.state.instruments) {
+      const raw = data[`fee_${i.root}`];
+      if (raw === undefined) continue;
+      const fee = Number(String(raw).trim().replace(',', '.'));
+      if (!isFinite(fee) || fee < 0) { toast(`Revisa la comisión de ${i.root}: escribe un número, por ejemplo 1.29.`); return; }
+      if (fee !== i.fee) S.state = await api('PUT', `/api/instruments/${encodeURIComponent(i.root)}`, { multiplier: i.multiplier, fee });
+    }
+    if (data.feeMode && data.feeMode !== S.state.settings.feeMode) S.state = await api('PUT', '/api/settings', { feeMode: data.feeMode });
+    S.trades = await api('GET', '/api/trades');
+    const total = S.trades.filter((t) => t.status === 'closed').reduce((a, t) => a + t.fees, 0);
+    toast(`Comisiones guardadas. Total descontado: ${money(total, { sign: false })}.`); render();
   } else if (form.dataset.form === 'rules') {
     S.state = await api('PUT', '/api/settings', { rules: rulesFromForm(data) });
     toast('Reglas guardadas.'); render();
