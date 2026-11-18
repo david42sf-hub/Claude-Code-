@@ -172,7 +172,9 @@ function viewPanel(el) {
   const ratio = s.avgWin != null && s.avgLoss ? s.avgWin / -s.avgLoss : null;
   const winMeter = s.winRate == null ? '' : `<div class="meter"><i style="width:${s.winRate * 100}%"></i><b></b></div>`;
   const unknown = [...new Set(list.filter((t) => t.unknownInstrument).map((t) => t.root))];
+  const noFees = [...new Set(list.filter((t) => t.status === 'closed' && t.fees === 0).map((t) => t.root))];
   el.innerHTML = `
+    ${noFees.length ? `<div class="notice warn">Estas operaciones no descuentan comisiones (${esc(noFees.join(', '))}): su resultado neto es igual al bruto. Indica la comisión por contrato y por lado en <a href="#ajustes">Ajustes</a> y se recalcula todo.</div>` : ''}
     ${unknown.length ? `<div class="notice warn">No conozco el valor por punto de <b>${esc(unknown.join(', '))}</b>; su resultado se calcula con valor 1. Corrígelo en <a href="#ajustes">Ajustes</a>.</div>` : ''}
     ${open ? `<div class="notice">${open} posición(es) abierta(s) no se incluyen en las métricas hasta que se cierren.</div>` : ''}
     <div class="grid kpis">
