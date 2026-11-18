@@ -7,6 +7,7 @@ import { Store } from './store.js';
 import { parseTradovateCsv } from './csv.js';
 import { parseTimestamp } from './time.js';
 import { TradovateSync, tradovateConfig } from './tradovate.js';
+import { PUBLIC_FEED, mapPublicFeed, filterEvents } from './economic.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MIME = {
@@ -22,6 +23,8 @@ export function createApp({ dataDir, password = '', tradovate = tradovateConfig(
   fs.mkdirSync(path.join(dataDir, 'uploads'), { recursive: true });
   const store = new Store(path.join(dataDir, 'diario.db'));
   const sync = new TradovateSync(tradovate, store, fetchImpl);
+  const doFetch = fetchImpl || fetch;
+  let feedCache = null;   // el feed público cambia poco: se guarda 30 minutos
   const publicDir = path.join(ROOT, 'public');
   const uploadsDir = path.join(dataDir, 'uploads');
   const sessionToken = password
@@ -136,8 +139,8 @@ export function createApp({ dataDir, password = '', tradovate = tradovateConfig(
       return send(res, 200, { ok: true });
     }
     if ((mm = /^\/trades\/([^/]+)\/meta$/.exec(p)) && m === 'PUT') {
-      const { notes, strategy, tags, mistakes, stop } = await readBody(req);
-      return send(res, 200, store.setMeta(decodeURIComponent(mm[1]), { notes, strategy, tags, mistakes, stop }));
+      const { notes, strategy, tags, mistakes, stop, playbook, followed } = await readBody(req);
+      return send(res, 200, store.setMeta(decodeURIComponent(mm[1]), { notes, strategy, tags, mistakes, stop, playbook, followed }));
     }
     if ((mm = /^\/trades\/([^/]+)\/shots$/.exec(p)) && m === 'POST') {
       const id = decodeURIComponent(mm[1]);
@@ -174,6 +177,28 @@ export function createApp({ dataDir, password = '', tradovate = tradovateConfig(
         store.setInstrument(decodeURIComponent(mm[1]), { multiplier: Number(b.multiplier), fee: Number(b.fee), name: b.name });
       } catch (e) { throw new HttpError(400, e.message); }
       return send(res, 200, state());
+    }
+    if (p === '/data' && m === 'DELETE') {
+      const { confirm } = await readBody(req, 4096);
+      if (confirm !== 'BORRAR') throw new HttpError(400, 'Falta la confirmación.');
+      for (const s of store.deleteAllData()) fs.rmSync(path.join(uploadsDir, path.basename(s)), { force: true });
+      return send(res, 200, state());
+    }
+    if (p === '/economic' && m === 'GET') {
+      const q = url.searchParams;
+      const out = { source: 'Forex Factory (feed público)', coverage: 'week', events: [],
+        note: 'Feed público gratuito: solo la semana en curso y sin valores "actual". Para ver historial usa la página publicada en Claude con tu cuenta de Tradezella.' };
+      try {
+        if (!feedCache || Date.now() - feedCache.at > 30 * 60_000) {
+          const r = await doFetch(PUBLIC_FEED, { headers: { Accept: 'application/json' } });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          feedCache = { at: Date.now(), json: await r.json() };
+        }
+        out.events = filterEvents(mapPublicFeed(feedCache.json, store.settings().tz), {
+          from: q.get('from') || undefined, to: q.get('to') || undefined, impact: q.get('impact') || undefined, countries: q.get('countries') || undefined,
+        });
+      } catch (e) { out.error = `No se pudo cargar el calendario económico (${e.message}).`; }
+      return send(res, 200, out);
     }
     if (p === '/sync' && m === 'POST') {
       try { const r = await sync.run(); return send(res, 200, { ...r, sync: sync.status }); }

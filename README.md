@@ -8,6 +8,9 @@ Diario de trading personal para futuros operados en Tradovate: registra tus oper
 - **Operaciones**: tabla ordenable y filtrable; cada operación tiene estrategia, etiquetas, errores, notas, precio de stop (para el R múltiple), capturas de pantalla y el detalle de sus ejecuciones.
 - **Diario**: notas por día junto a las operaciones de esa jornada.
 - **Disciplina**: tus reglas (horario, pausa tras pérdidas seguidas, pérdida máxima por día y por operación, máximo de operaciones) se comprueban solas; muestra qué días las cumpliste, cuánto te costó romperlas y detecta patrones de comportamiento (sobreoperación, venganza, sobreconfianza, pérdidas aguantadas de más, días perfectos).
+- **Playbooks**: escribe tus estrategias como reglas agrupadas, marca en cada operación qué reglas cumpliste y mira el cumplimiento medio y qué reglas te hacen ganar o perder dinero.
+- **Noticias**: calendario económico por semana (filtro de impacto y país), tu resultado en días con noticias de alto impacto y una calculadora de tamaño de posición.
+- **Asistente** (solo en la versión de una página publicada en Claude): chat con Claude que analiza el premercado y el mercado con velas y calendario reales, y opcionalmente con un resumen de tu diario.
 - **Reportes**: resultado por símbolo, día de la semana, hora de entrada, duración, lado, estrategia, etiqueta y error.
 - **Importar**: CSV de Tradovate (reportes *Performance* y *Fills*) y operaciones manuales. Reimportar no duplica nada.
 - **Sincronización automática** con la API de Tradovate (solo lectura).
@@ -63,3 +66,9 @@ Para que sincronice sin tener tu computadora encendida, despliégala en un servi
 ## Versión de una sola página
 
 `node scripts/build-artifact.mjs` genera `dist/diario-de-trading.html`: la misma interfaz sin servidor, con los datos guardados en el navegador o en el espacio de datos de la página donde se publique. No incluye sincronización con la API ni capturas de pantalla.
+
+Al publicarla con Claude se declaran los permisos `db`, `user`, `sample` y `mcp` (conector de Tradezella, solo las herramientas `get_market_data` y `get_economic_calendar`). Esas consultas envían símbolo, fechas e impacto; nunca operaciones, notas ni playbooks. En la versión con servidor, el calendario usa un feed público gratuito de la semana en curso y el asistente no está disponible.
+
+## Borrar los datos
+
+Ajustes → **Borrar todos los datos** elimina operaciones, notas, capturas y playbooks, y deja solo NQ y MNQ como instrumentos. Conserva la zona horaria, las reglas y las comisiones de NQ y MNQ.

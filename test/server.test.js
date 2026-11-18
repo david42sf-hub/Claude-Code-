@@ -58,13 +58,13 @@ test('importar, anotar, reimportar sin duplicar y borrar', async () => {
     assert.equal((await app.call('POST', `/api/trades/${es.id}/shots`, { dataUrl: 'data:text/html;base64,AAAA' })).status, 400);
 
     r = await app.call('POST', '/api/trades', {
-      contract: 'MESZ6', side: 'short', qty: 3, entryPrice: 5000, exitPrice: 4996, fees: 3,
+      contract: 'MNQZ6', side: 'short', qty: 3, entryPrice: 20000, exitPrice: 19996, fees: 3,
       entryTime: '2026-11-13T11:00', exitTime: '2026-11-13T11:10', account: 'Real',
     });
     assert.equal(r.status, 201);
     r = await app.call('GET', '/api/trades');
     const manual = r.body.find((t) => t.manual);
-    assert.deepEqual([manual.side, manual.gross, manual.fees, manual.net], ['short', 60, 3, 57]);
+    assert.deepEqual([manual.side, manual.gross, manual.fees, manual.net], ['short', 24, 3, 21]);
     assert.equal((await app.call('POST', '/api/trades', { contract: 'ES', qty: 0 })).status, 400);
 
     assert.equal((await app.call('DELETE', `/api/trades/${es.id}`)).status, 200);
@@ -89,6 +89,31 @@ test('las reglas de disciplina se guardan, se sanean y tienen valores por defect
     assert.deepEqual([r.body.settings.rules.maxLossDay, r.body.settings.rules.hours.from], [{ on: true, value: 250 }, '09:30']);
     assert.equal((await app.call('GET', '/api/state')).body.settings.rules.maxLossDay.value, 250);
     assert.equal((await app.call('GET', '/api/state')).body.settings.tz, 'America/New_York');
+  } finally { app.close(); }
+});
+
+test('borrar todos los datos deja la app vacía y conserva los ajustes', async () => {
+  const app = await boot();
+  try {
+    await app.call('POST', '/api/import', { csv: CSV, account: 'Real' });
+    const t = (await app.call('GET', '/api/trades')).body[0];
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const shot = (await app.call('POST', `/api/trades/${t.id}/shots`, { dataUrl: png })).body.shots[0];
+    await app.call('PUT', '/api/days/2026-11-13', { notes: 'nota' });
+    await app.call('PUT', '/api/settings', { tz: 'America/Chicago', playbooks: [{ id: 'p1', name: 'A', groups: [] }] });
+    await app.call('PUT', '/api/instruments/NQ', { multiplier: 20, fee: 1.1 });
+    assert.ok((await app.call('GET', '/api/state')).body.instruments.some((i) => i.root === 'ES'));
+
+    assert.equal((await app.call('DELETE', '/api/data', {})).status, 400);               // exige confirmación
+    const r = await app.call('DELETE', '/api/data', { confirm: 'BORRAR' });
+    assert.equal(r.status, 200);
+    assert.deepEqual((await app.call('GET', '/api/trades')).body, []);
+    assert.equal(r.body.fills, 0);
+    assert.deepEqual(r.body.days, {});
+    assert.deepEqual(r.body.settings.playbooks, []);
+    assert.equal(r.body.settings.tz, 'America/Chicago');
+    assert.deepEqual(r.body.instruments.map((i) => [i.root, i.fee]), [['MNQ', 0], ['NQ', 1.1]]);
+    assert.equal((await fetch(`${app.base}/uploads/${shot}`)).status, 404);
   } finally { app.close(); }
 });
 

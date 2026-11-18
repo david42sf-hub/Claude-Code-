@@ -1,5 +1,7 @@
-import { summarize, groupStats, rMultiple, durationBucket, DURATION_BUCKETS, weekday } from '/lib/stats.js';
+import { summarize, groupStats, rMultiple, durationBucket, DURATION_BUCKETS, weekday, heatmap } from '/lib/stats.js';
 import { evaluateRules, behavioralInsights, normalizeRules, RULE_LABELS, KIND_LABELS } from '/lib/insights.js';
+import { normalizePlaybooks, playbookTemplate, playbookStats, flatRules } from '/lib/playbooks.js';
+import { newsDayStats, positionSize } from '/lib/news.js';
 import { lineChart, columnChart, hbarChart, hideTip } from '/charts.js';
 
 // ---------- utilidades ----------
@@ -32,7 +34,12 @@ let S = {
   state: null, trades: [], needLogin: false,
   filter: { range: 'all', from: '', to: '', account: '', symbol: '', side: '' },
   sort: { key: 'time', dir: -1 }, calMonth: null, reportTab: 'symbol', openId: null, page: 1,
+  pbSel: null, pbDraft: null, pbNew: false,
+  news: { weekStart: null, impacts: ['high', 'medium'], country: null, cache: new Map(), enabled: false },
+  ai: { messages: [], busy: false, market: false, journal: false, status: '', ctl: null, available: null },
 };
+const uid = () => (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now().toString(36)).replace(/-/g, '').slice(0, 12);
+const pbOf = (id) => S.state.settings.playbooks.find((p) => p.id === id);
 const tz = () => S.state.settings.tz;
 const fmtTime = (ts, withDate = true) => (ts ? new Date(ts).toLocaleString('es', {
   timeZone: tz(), ...(withDate ? { day: '2-digit', month: 'short' } : {}), hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
@@ -101,7 +108,7 @@ function filterBar() {
 
 // ---------- estructura ----------
 const VIEWS = [
-  ['panel', 'Panel'], ['operaciones', 'Operaciones'], ['diario', 'Diario'], ['disciplina', 'Disciplina'], ['reportes', 'Reportes'], ['importar', 'Importar'], ['ajustes', 'Ajustes'],
+  ['panel', 'Panel'], ['operaciones', 'Operaciones'], ['diario', 'Diario'], ['playbooks', 'Playbooks'], ['disciplina', 'Disciplina'], ['reportes', 'Reportes'], ['noticias', 'Noticias'], ['asistente', 'Asistente'], ['importar', 'Importar'], ['ajustes', 'Ajustes'],
 ];
 const LOGO = `<svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1c5cab"/><path d="M6 21l6-7 5 4 9-10" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const view = () => { const v = location.hash.replace(/^#\/?/, '').split('/')[0]; return VIEWS.some(([k]) => k === v) ? v : 'panel'; };
@@ -120,7 +127,7 @@ function render() {
   if (!S.state) { app.innerHTML = '<div class="empty">Cargando…</div>'; return; }
   const v = view();
   const title = VIEWS.find(([k]) => k === v)[1];
-  const showFilters = ['panel', 'operaciones', 'diario', 'disciplina', 'reportes'].includes(v) && S.trades.length;
+  const showFilters = ['panel', 'operaciones', 'diario', 'playbooks', 'disciplina', 'reportes'].includes(v) && S.trades.length;
   app.innerHTML = `<div class="shell">
     <aside class="side">
       <div class="brand">${LOGO}<span>Diario de trading</span></div>
@@ -131,13 +138,12 @@ function render() {
     </aside>
     <main class="main">
       <div class="top"><h1>${title}</h1>${showFilters ? filterBar() : ''}</div>
-      ${S.state.example ? '<div class="notice"><b>Datos de ejemplo.</b> Estas operaciones son inventadas para mostrar cómo funciona el diario. Desaparecen cuando <a href="#importar">importas tu CSV de Tradovate</a> o registras tu primera operación.</div>' : ''}
       ${S.state.storageNote ? `<div class="notice warn">${esc(S.state.storageNote)}</div>` : ''}
       <div id="view"></div>
     </main></div>
     <dialog class="drawer" id="drawer"></dialog>`;
   const el = $('#view');
-  ({ panel: viewPanel, operaciones: viewTrades, diario: viewDiary, disciplina: viewDiscipline, reportes: viewReports, importar: viewImport, ajustes: viewSettings })[v](el);
+  ({ panel: viewPanel, operaciones: viewTrades, diario: viewDiary, playbooks: viewPlaybooks, disciplina: viewDiscipline, reportes: viewReports, noticias: viewNews, asistente: viewAssistant, importar: viewImport, ajustes: viewSettings })[v](el);
   if (S.openId) openDrawer(S.openId);
 }
 
@@ -296,8 +302,9 @@ function openDrawer(id) {
       <div><span>Duración</span><b class="num">${duration(t.durationS)}</b></div>
     </div>
     <div class="muted">Cuenta ${esc(t.account)} · ${num(t.qty, 0)} contrato(s) · valor por punto ${price(t.mult)} · ${fmtDayLong(t.day)}</div>
+    ${playbookBlock(t)}
     <div class="form-grid">
-      <label class="field">Estrategia<input type="text" data-meta="strategy" value="${esc(t.strategy)}" list="dl-strategies" placeholder="p. ej. Ruptura de apertura">
+      <label class="field">Estrategia (nota libre)<input type="text" data-meta="strategy" value="${esc(t.strategy)}" list="dl-strategies" placeholder="p. ej. Ruptura de apertura">
         <datalist id="dl-strategies">${strategies.map((s) => `<option value="${esc(s)}">`).join('')}</datalist></label>
       <label class="field">Precio del stop<input type="number" step="any" data-meta="stop" value="${t.stop ?? ''}" placeholder="para calcular R"></label>
       <label class="field">Etiquetas<input type="text" data-meta="tags" value="${esc(t.tags.join(', '))}" placeholder="separadas por comas"></label>
@@ -313,14 +320,29 @@ function openDrawer(id) {
     <div class="row"><button class="btn danger" data-action="del-trade">Eliminar operación</button></div></div>`;
   if (!dlg.open) dlg.showModal();
 }
+function playbookBlock(t) {
+  const pbs = S.state.settings.playbooks;
+  const pb = pbs.find((p) => p.id === t.playbook);
+  const rules = pb ? flatRules(pb) : [];
+  const done = new Set(t.followed);
+  const n = rules.filter((r) => done.has(r.id)).length;
+  return `<div class="stack" style="gap:10px"><label class="field">Playbook<select data-meta="playbook">
+      <option value="">Sin playbook</option>${pbs.map((p) => `<option value="${esc(p.id)}" ${p.id === t.playbook ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+    ${pbs.length ? '' : '<p class="muted" style="margin:0">Crea tu primer playbook en la sección <a href="#playbooks">Playbooks</a> para marcar qué reglas cumpliste en cada operación.</p>'}
+    ${pb ? `<div class="card" style="background:var(--surface-2)"><h3 style="margin-bottom:8px">Reglas cumplidas <span class="num">${n}/${rules.length}</span></h3>
+      ${pb.groups.map((g) => g.rules.length ? `<div style="margin-bottom:8px"><div class="muted" style="font-size:12px;margin-bottom:4px">${esc(g.name)}</div>
+        ${g.rules.map((r) => `<label class="row" style="flex-wrap:nowrap;align-items:flex-start;margin-bottom:4px"><input type="checkbox" data-follow value="${esc(r.id)}" ${done.has(r.id) ? 'checked' : ''}> <span>${esc(r.text)}</span></label>`).join('')}</div>` : '').join('')}</div>` : ''}</div>`;
+}
 async function saveMeta(field, value) {
   const patch = {};
-  if (field === 'tags' || field === 'mistakes') patch[field] = value.split(',').map((s) => s.trim()).filter(Boolean);
+  if (field === 'playbook') { patch.playbook = value; patch.followed = []; }
+  else if (field === 'followed') patch.followed = value;
+  else if (field === 'tags' || field === 'mistakes') patch[field] = value.split(',').map((s) => s.trim()).filter(Boolean);
   else if (field === 'stop') patch.stop = value === '' ? null : Number(value);
   else patch[field] = value;
   const updated = await api('PUT', `/api/trades/${encodeURIComponent(S.openId)}/meta`, patch);
   S.trades = S.trades.map((t) => (t.id === updated.id ? updated : t));
-  if (field === 'stop') openDrawer(S.openId);
+  if (field === 'stop' || field === 'playbook' || field === 'followed') openDrawer(S.openId);
 }
 function readFile(file, as) {
   return new Promise((resolve, reject) => {
@@ -446,17 +468,19 @@ const REPORTS = {
   hour: ['Hora de entrada', (t) => t.hour, (k) => `${String(k).padStart(2, '0')}:00`, (a, b) => a.key - b.key],
   duration: ['Duración', durationBucket, null, (a, b) => DURATION_BUCKETS.findIndex(([n]) => n === a.key) - DURATION_BUCKETS.findIndex(([n]) => n === b.key)],
   side: ['Lado', (t) => (t.side === 'long' ? 'Largos' : 'Cortos')],
-  strategy: ['Estrategia', (t) => t.strategy || 'Sin estrategia'],
+  strategy: ['Playbook / estrategia', (t) => pbOf(t.playbook)?.name || t.strategy || 'Sin estrategia'],
   tag: ['Etiqueta', (t) => (t.tags.length ? t.tags : ['Sin etiqueta'])],
   mistake: ['Error', (t) => (t.mistakes.length ? t.mistakes : ['Sin errores'])],
+  heat: ['Día × hora'],
 };
 function viewReports(el) {
   if (!S.trades.length) { el.innerHTML = emptyState(); return; }
   const list = filtered();
+  if (S.reportTab === 'heat') return viewHeat(el, list);
   const [title, keyFn, labelFn, sortFn] = REPORTS[S.reportTab];
   const groups = groupStats(list, keyFn).sort(sortFn || ((a, b) => b.net - a.net));
   const label = (g) => (labelFn ? labelFn(g.key) : String(g.key));
-  const tabs = `<div class="tabs" role="tablist">${Object.entries(REPORTS).map(([k, [l]]) => `<button role="tab" aria-selected="${k === S.reportTab}" data-action="report" data-tab="${k}">${l}</button>`).join('')}</div>`;
+  const tabs = reportTabs();
   if (!groups.length) { el.innerHTML = tabs + noMatch(); return; }
   el.innerHTML = `${tabs}<div class="grid half">
     <div class="card"><h2>Resultado neto por ${title.toLowerCase()}</h2><div id="c-report"></div></div>
@@ -467,6 +491,43 @@ function viewReports(el) {
     label: label(g), value: g.net, text: money(g.net),
     tip: `<b class="num">${money(g.net)}</b>${esc(label(g))}<br>${g.count} operación(es) · acierto ${pct(g.winRate)}`,
   })));
+}
+
+function reportTabs() {
+  return `<div class="tabs" role="tablist">${Object.entries(REPORTS).map(([k, [l]]) => `<button role="tab" aria-selected="${k === S.reportTab}" data-action="report" data-tab="${k}">${l}</button>`).join('')}</div>`;
+}
+function viewHeat(el, list) {
+  const cells = heatmap(list);
+  if (!cells.length) { el.innerHTML = reportTabs() + noMatch(); return; }
+  const hours = [...new Set(cells.map((c) => c.hour))].sort((a, b) => a - b);
+  const lo = hours[0], hi = hours[hours.length - 1];
+  const dows = [1, 2, 3, 4, 5, 6, 0].filter((d) => cells.some((c) => c.dow === d));
+  const max = Math.max(...cells.map((c) => Math.abs(c.net))) || 1;
+  const at = new Map(cells.map((c) => [`${c.dow}-${c.hour}`, c]));
+  const cols = hi - lo + 1;
+  let grid = '<div></div>' + Array.from({ length: cols }, (_, i) => `<div class="hl">${String(lo + i).padStart(2, '0')}h</div>`).join('');
+  for (const d of dows) {
+    grid += `<div class="hl">${DOW[d].slice(0, 3)}</div>`;
+    for (let h = lo; h <= hi; h++) {
+      const c = at.get(`${d}-${h}`);
+      if (!c) { grid += '<div class="c empty-c"></div>'; continue; }
+      const a = Math.round(18 + 62 * (Math.abs(c.net) / max));
+      grid += `<div class="c" data-tip="1" data-d="${d}" data-h="${h}" style="background:color-mix(in srgb, var(${c.net >= 0 ? '--up' : '--down'}) ${a}%, var(--surface))"><b class="num">${shortMoney(c.net)}</b><span>${c.count} op.</span></div>`;
+    }
+  }
+  el.innerHTML = `${reportTabs()}<div class="card"><h2>Resultado neto por día y hora de entrada <small>hora en ${esc(tz())}</small></h2>
+    <div class="table-wrap"><div class="heat" style="--cols:${cols}">${grid}</div></div>
+    <p class="muted" style="margin-bottom:0">Cada celda suma el resultado de las operaciones que abriste en ese día y hora. Úsalo para ver en qué franjas ganas y en cuáles pierdes dinero de forma repetida.</p></div>`;
+  const wrap = $('.heat', el);
+  wrap.onpointermove = (ev) => {
+    const c = ev.target.closest('.c[data-tip]');
+    if (!c) return hideTip();
+    const cell = at.get(`${c.dataset.d}-${c.dataset.h}`);
+    const tip = $('#tip');
+    tip.innerHTML = `<b class="num">${money(cell.net)}</b>${DOW[cell.dow]} · ${String(cell.hour).padStart(2, '0')}:00<br>${cell.count} operación(es) · acierto ${pct(cell.wins / cell.count)}`;
+    tip.hidden = false; tip.style.left = `${ev.clientX + 14}px`; tip.style.top = `${ev.clientY - 60}px`;
+  };
+  wrap.onpointerleave = hideTip;
 }
 
 // ---------- importar ----------
@@ -528,8 +589,7 @@ async function importFiles(files) {
 
 // ---------- ajustes ----------
 function viewSettings(el) {
-  const used = new Set(S.trades.map((t) => t.root));
-  const inst = [...S.state.instruments].sort((a, b) => (used.has(b.root) - used.has(a.root)) || a.root.localeCompare(b.root));
+  const inst = [...S.state.instruments].sort((a, b) => a.root.localeCompare(b.root));
   const zones = [...new Set([tz(), 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Mexico_City', 'America/Bogota', 'America/Lima', 'America/Santiago', 'America/Argentina/Buenos_Aires', 'America/Caracas', 'Europe/Madrid', 'Europe/London', 'UTC'])];
   const theme = currentTheme();
   el.innerHTML = `<div class="stack">
@@ -541,7 +601,7 @@ function viewSettings(el) {
     <div class="card"><h2>Instrumentos y comisiones <small>la comisión es por contrato y por lado</small></h2>
       <p class="muted" style="margin-top:0">El reporte Performance de Tradovate no trae comisiones: indícalas aquí para que el resultado neto sea real. Con la sincronización por API se usan las comisiones exactas de cada ejecución.</p>
       <div class="table-wrap"><table><thead><tr><th>Símbolo</th><th>Nombre</th><th class="r">Valor por punto ($)</th><th class="r">Comisión ($)</th><th></th></tr></thead>
-      <tbody>${inst.map((i) => `<tr data-root="${esc(i.root)}"><td><b>${esc(i.root)}</b>${used.has(i.root) ? ' <span class="pill open">en uso</span>' : ''}</td><td class="muted">${esc(i.name)}</td>
+      <tbody>${inst.map((i) => `<tr data-root="${esc(i.root)}"><td><b>${esc(i.root)}</b></td><td class="muted">${esc(i.name)}</td>
         <td class="r"><input type="number" step="any" min="0" value="${i.multiplier}" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto de ${esc(i.root)}"></td>
         <td class="r"><input type="number" step="any" min="0" value="${i.fee}" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión de ${esc(i.root)}"></td>
         <td><button class="btn small" data-action="save-inst">Guardar</button></td></tr>`).join('')}
@@ -549,7 +609,275 @@ function viewSettings(el) {
         <td class="r"><input type="number" step="any" min="0" data-inst="multiplier" style="width:110px;text-align:right" aria-label="Valor por punto"></td>
         <td class="r"><input type="number" step="any" min="0" value="0" data-inst="fee" style="width:90px;text-align:right" aria-label="Comisión"></td>
         <td><button class="btn small" data-action="save-inst">Añadir</button></td></tr></tbody></table></div></div>
-    <div class="card"><h2>Datos</h2><p class="muted" style="margin:0">${S.state.dataNote ? esc(S.state.dataNote) : `${S.state.fills} ejecuciones guardadas en <code>data/diario.db</code> (SQLite) y capturas en <code>data/uploads</code>. Haz copia de la carpeta <code>data</code> para respaldar todo.`}</p></div></div>`;
+    <div class="card"><h2>Datos</h2><p class="muted" style="margin-top:0">${S.state.dataNote ? esc(S.state.dataNote) : `${S.state.fills} ejecuciones guardadas en <code>data/diario.db</code> (SQLite) y capturas en <code>data/uploads</code>. Haz copia de la carpeta <code>data</code> para respaldar todo.`}</p>
+      <div class="row" style="margin-top:12px"><button class="btn danger" data-action="wipe">Borrar todos los datos</button>
+        <span class="muted">Elimina operaciones, notas, capturas, playbooks y los instrumentos detectados al importar. Conserva la zona horaria, tus reglas y las comisiones de NQ y MNQ.</span></div></div></div>`;
+}
+
+// ---------- playbooks ----------
+function armed(el, text) {
+  if (el.dataset.armed) return true;
+  const original = el.textContent;
+  el.dataset.armed = '1'; el.textContent = text;
+  setTimeout(() => { if (el.isConnected) { delete el.dataset.armed; el.textContent = original; } }, 5000);
+  return false;
+}
+function pbEditor() {
+  const d = S.pbDraft;
+  return `<div class="card"><h2>${S.pbNew ? 'Nuevo playbook' : 'Editar playbook'}</h2><div class="stack">
+    <label class="field">Nombre<input type="text" data-pb="name" value="${esc(d.name)}" maxlength="80"></label>
+    <label class="field">Descripción<textarea data-pb="description" style="min-height:60px" placeholder="¿Cuándo usas este setup y qué busca?">${esc(d.description)}</textarea></label>
+    ${d.groups.map((g) => `<div class="card" style="background:var(--surface-2)"><div class="row" style="flex-wrap:nowrap"><input type="text" data-pb-group="${g.id}" value="${esc(g.name)}" style="flex:1;font-weight:600" aria-label="Nombre del grupo"><button class="btn small danger" data-action="pb-del-group" data-gid="${g.id}">Quitar grupo</button></div>
+      <div class="stack" style="gap:6px;margin-top:8px">${g.rules.map((r) => `<div class="row" style="flex-wrap:nowrap"><input type="text" data-pb-rule="${r.id}" value="${esc(r.text)}" style="flex:1" aria-label="Regla" placeholder="Escribe la regla"><button class="btn small" data-action="pb-del-rule" data-rid="${r.id}" aria-label="Quitar regla">✕</button></div>`).join('')}
+      <div><button class="btn small" data-action="pb-add-rule" data-gid="${g.id}">+ Añadir regla</button></div></div></div>`).join('')}
+    <div><button class="btn" data-action="pb-add-group">+ Añadir grupo</button></div>
+    <div class="row"><button class="btn primary" data-action="pb-save">Guardar playbook</button><button class="btn" data-action="pb-cancel">Cancelar</button>${S.pbNew ? '' : '<button class="btn danger" data-action="pb-delete">Eliminar playbook</button>'}</div></div></div>`;
+}
+function pbDetail(pb, list) {
+  const st = playbookStats(list, pb);
+  const rules = st.rules;
+  const best = st.best;
+  const sum = st.summary;
+  const body = !st.count ? `<div class="empty" style="padding:20px"><strong>Aún no hay operaciones con este playbook</strong>Abre una operación y elígelo en el campo Playbook para marcar qué reglas cumpliste.</div>` : `
+    <div class="grid kpis" style="margin-bottom:14px">
+      ${kpi('Operaciones', String(st.count), `${sum.wins} ganadoras · ${sum.losses} perdedoras`)}
+      ${kpi('Resultado neto', `<span class="${cls(sum.net)}">${money(sum.net)}</span>`, `${money(sum.expectancy)} por operación`)}
+      ${kpi('Tasa de acierto', pct(sum.winRate), `factor de beneficio ${sum.profitFactor == null ? '—' : num(sum.profitFactor)}`)}
+      ${kpi('Cumplimiento medio', pct(st.adherence), `${rules.length} reglas`)}
+    </div>
+    ${st.complete.count && st.incomplete.count ? `<div class="notice">Con <b>todas las reglas cumplidas</b> (${st.complete.count} op.): <b class="${cls(st.complete.expectancy)}">${money(st.complete.expectancy)}</b> por operación. Con alguna regla saltada (${st.incomplete.count} op.): <b class="${cls(st.incomplete.expectancy)}">${money(st.incomplete.expectancy)}</b> por operación.</div>` : ''}
+    ${best ? `<div class="notice">La regla que más separa tus resultados: <b>«${esc(best.rule.text)}»</b>. Cumplirla rinde ${money(best.rule.followed.expectancy)} por operación y saltártela ${money(best.rule.skipped.expectancy)}.</div>` : ''}
+    <div class="table-wrap"><table><thead><tr><th>Regla</th><th class="r">Cumplida</th><th class="r">Neto si la cumples</th><th class="r">Neto si no</th><th class="r">Acierto si la cumples</th><th class="r">Acierto si no</th></tr></thead><tbody>
+    ${rules.map((r) => `<tr><td style="white-space:normal;min-width:220px">${esc(r.text)} <span class="muted">· ${esc(r.group)}</span></td><td class="r num">${pct(r.followRate)}</td>
+      <td class="r num ${cls(r.followed.net)}">${r.followed.count ? money(r.followed.net) : '—'}</td><td class="r num ${cls(r.skipped.net)}">${r.skipped.count ? money(r.skipped.net) : '—'}</td>
+      <td class="r num">${pct(r.followed.winRate)}</td><td class="r num">${pct(r.skipped.winRate)}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="card"><h2>${esc(pb.name)} <button class="btn small" data-action="pb-edit">Editar reglas</button></h2>
+    ${pb.description ? `<p class="muted" style="margin-top:0">${esc(pb.description)}</p>` : ''}${body}</div>`;
+}
+function viewPlaybooks(el) {
+  const pbs = S.state.settings.playbooks;
+  if (!pbs.length && !S.pbDraft) {
+    el.innerHTML = `<div class="card empty"><strong>Aún no tienes playbooks</strong>Un playbook es tu estrategia escrita como una lista de reglas. Después marcas en cada operación qué reglas cumpliste y la app te muestra cuáles te hacen ganar dinero.
+      <div style="margin-top:14px"><button class="btn primary" data-action="pb-new">Crear con plantilla</button></div></div>`;
+    return;
+  }
+  const list = filtered().filter((t) => t.status === 'closed');
+  const unassigned = list.filter((t) => !pbOf(t.playbook)).length;
+  const cards = pbs.map((pb) => {
+    const st = playbookStats(list, pb);
+    return `<button class="card pb-card ${pb.id === S.pbSel ? 'sel' : ''}" data-action="pb-select" data-id="${esc(pb.id)}"><b>${esc(pb.name)}</b>
+      <span class="muted">${flatRules(pb).length} reglas · ${st.count} operaciones</span>
+      <span class="num ${cls(st.summary.net)}" style="font-size:18px;font-weight:650">${st.count ? money(st.summary.net) : '—'}</span>
+      <span class="muted num">Acierto ${pct(st.summary.winRate)} · Cumplimiento ${pct(st.adherence)}</span></button>`;
+  }).join('');
+  const selected = S.pbSel && !S.pbNew ? pbOf(S.pbSel) : null;
+  el.innerHTML = `<div class="stack"><div class="row"><button class="btn primary" data-action="pb-new">Nuevo playbook</button>
+      ${S.trades.length ? `<span class="muted">${unassigned} operaciones sin playbook en este periodo.</span>` : ''}</div>
+    <div class="grid pb-grid">${cards}</div>
+    ${S.pbDraft ? pbEditor() : selected ? pbDetail(selected, list) : '<div class="muted">Elige un playbook para ver el rendimiento de cada una de sus reglas.</div>'}</div>`;
+}
+
+// ---------- noticias ----------
+const IMPACT = { high: ['Alto', 'short'], medium: ['Medio', 'open'], low: ['Bajo', ''] };
+const mondayOf = (day) => addDays(day, -((weekday(day) + 6) % 7));
+async function loadNews(key, params) {
+  const hit = S.news.cache.get(key);
+  if (hit) return;
+  S.news.cache.set(key, { loading: true });
+  try { S.news.cache.set(key, await api('GET', `/api/economic?${new URLSearchParams(params)}`)); }
+  catch (e) { S.news.cache.set(key, { events: [], error: e.message }); }
+  if (view() === 'noticias') render();
+}
+S.calc = { root: '', risk: 100, stop: 10 };
+function calcResult() {
+  const i = S.state.instruments.find((x) => x.root === S.calc.root);
+  if (!i) return '<span class="muted">Elige un instrumento.</span>';
+  const r = positionSize({ risk: Number(S.calc.risk), stopPoints: Number(S.calc.stop), multiplier: i.multiplier, fee: i.fee });
+  if (!r) return '<span class="muted">Escribe un riesgo y un stop mayores que cero.</span>';
+  return `<b class="num" style="font-size:20px">${r.contracts} contrato${r.contracts === 1 ? '' : 's'}</b>
+    <div class="muted num">Cada contrato arriesga ${money(r.perContract, { sign: false })} (stop ${money(r.stopDollars, { sign: false })}${i.fee ? ` + comisiones ${money(2 * i.fee, { sign: false })}` : ''}). Riesgo total ${money(r.riskUsed, { sign: false })}.${r.contracts === 0 ? ' Con este riesgo no alcanza ni para un contrato: reduce el stop o sube el riesgo.' : ''}</div>`;
+}
+function calcCard() {
+  const inst = S.state.instruments;
+  if (!S.calc.root) S.calc.root = inst.find((i) => i.root === 'MNQ')?.root || inst[0]?.root || '';
+  return `<div class="card"><h2>Calculadora de tamaño <small>antes de operar la noticia</small></h2>
+    <div class="form-grid"><label class="field">Instrumento<select data-calc="root">${inst.map((i) => `<option ${i.root === S.calc.root ? 'selected' : ''}>${esc(i.root)}</option>`).join('')}</select></label>
+      <label class="field">Riesgo máximo ($)<input type="number" min="0" step="any" data-calc="risk" value="${S.calc.risk}"></label>
+      <label class="field">Stop (puntos)<input type="number" min="0" step="any" data-calc="stop" value="${S.calc.stop}"></label></div>
+    <div id="calc-out" style="margin-top:12px">${calcResult()}</div>
+    <p class="muted" style="margin-bottom:0">Usa el valor por punto y la comisión de Ajustes. Redondea hacia abajo para no pasarte del riesgo.</p></div>`;
+}
+function viewNews(el) {
+  const N = S.news;
+  if (feat('economicConsent') && !N.enabled) {
+    el.innerHTML = `<div class="stack"><div class="card"><h2>Calendario económico</h2>
+      <p style="margin-top:0">El calendario se consulta a tu cuenta de Tradezella solo cuando tú lo pides. La consulta envía únicamente fechas, impacto y país, y recibe los eventos del calendario. <b>No lee ni envía tus operaciones, notas ni playbooks.</b> Claude te pedirá permiso la primera vez.</p>
+      <button class="btn primary" data-action="news-enable">Cargar calendario</button></div>${calcCard()}</div>`;
+    return;
+  }
+  const w = N.weekStart ||= mondayOf(today());
+  const from = w, to = addDays(w, 6);
+  const wk = N.cache.get(`w|${from}`);
+  if (!wk) loadNews(`w|${from}`, { from, to });
+  const nav = `<div class="row"><button class="btn small" data-action="news-week" data-step="-1" aria-label="Semana anterior">‹</button>
+    <b>${fmtDay(from)} – ${fmtDay(to, { day: 'numeric', month: 'short', year: 'numeric' })}</b>
+    <button class="btn small" data-action="news-week" data-step="1" aria-label="Semana siguiente">›</button>
+    <button class="btn small" data-action="news-week" data-step="0">Esta semana</button></div>`;
+  if (!wk || wk.loading) { el.innerHTML = `<div class="stack"><div class="card">${nav}<div class="empty">Cargando calendario…</div></div>${calcCard()}</div>`; return; }
+  const countries = [...new Set(wk.events.map((e) => e.country))].sort();
+  if (N.country === null) N.country = countries.includes('US') ? 'US' : countries.includes('USD') ? 'USD' : '';
+  const events = wk.events.filter((e) => N.impacts.includes(e.impact) && (!N.country || e.country === N.country));
+  const toolbar = `<div class="row">${['high', 'medium', 'low'].map((k) => `<button class="btn small" data-action="news-impact" data-k="${k}" aria-pressed="${N.impacts.includes(k)}" style="${N.impacts.includes(k) ? 'border-color:var(--accent);color:var(--accent-ink)' : ''}">${IMPACT[k][0]}</button>`).join('')}
+    <select data-news="country" aria-label="País"><option value="">Todos los países</option>${countries.map((c) => `<option ${c === N.country ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>`;
+  const byDay = new Map();
+  for (const e of events) { if (!byDay.has(e.date)) byDay.set(e.date, []); byDay.get(e.date).push(e); }
+  const t0 = today();
+  const mine = (day) => { const ts = S.trades.filter((t) => t.status === 'closed' && t.day === day); return ts.length ? `<span class="muted">Tus operaciones: ${ts.length} · <b class="${cls(ts.reduce((a, t) => a + t.net, 0))}">${money(ts.reduce((a, t) => a + t.net, 0))}</b></span>` : ''; };
+  const days = [...byDay.keys()].sort().map((day) => `<div class="card"><h2>${cap(fmtDayLong(day))} ${day === t0 ? '<span class="pill open">Hoy</span>' : ''} ${mine(day)}</h2>
+    <div class="table-wrap"><table><thead><tr><th>Hora</th><th>País</th><th>Evento</th><th>Impacto</th><th class="r">Actual</th><th class="r">Previsión</th><th class="r">Anterior</th></tr></thead><tbody>
+    ${byDay.get(day).map((e) => `<tr><td class="num">${esc(e.time)}</td><td>${esc(e.country)}</td><td style="white-space:normal;min-width:200px">${esc(e.event)}</td>
+      <td><span class="pill ${(IMPACT[e.impact] || ['', ''])[1]}">${esc((IMPACT[e.impact] || [e.impact])[0])}</span></td>
+      <td class="r num"><b>${esc(e.actual || '—')}${e.actual ? esc(e.unit) : ''}</b></td><td class="r num">${esc(e.forecast || '—')}</td><td class="r num">${esc(e.previous || '—')}</td></tr>`).join('')}</tbody></table></div></div>`).join('');
+
+  // rendimiento en días de noticias (solo con fuentes que tienen historial)
+  let analysis = '';
+  const closed = S.trades.filter((t) => t.status === 'closed');
+  if (wk.coverage === 'range' && closed.length) {
+    const dsorted = closed.map((t) => t.day).sort();
+    const aTo = dsorted[dsorted.length - 1];
+    const aFrom = [dsorted[0], addDays(aTo, -365)].sort().pop();
+    const key = `a|${aFrom}|${aTo}|${N.country}`;
+    const ar = N.cache.get(key);
+    if (!ar) loadNews(key, { from: aFrom, to: aTo, impact: 'high', ...(N.country ? { countries: N.country } : {}) });
+    if (!ar || ar.loading) analysis = '<div class="card"><h2>Tu rendimiento en días de noticias</h2><div class="empty" style="padding:16px">Calculando…</div></div>';
+    else if (ar.error) analysis = `<div class="card"><h2>Tu rendimiento en días de noticias</h2><div class="notice warn">${esc(ar.error)}</div></div>`;
+    else {
+      const r = newsDayStats(closed.filter((t) => t.day >= aFrom && t.day <= aTo), ar.events);
+      const side = (title, x) => `<div><h3>${title}</h3><div class="num"><b class="${cls(x.net)}" style="font-size:20px">${money(x.net)}</b></div>
+        <div class="muted num">${x.days} días · media ${money(x.avgDay)} por día · ${pct(x.winRate)} días ganadores</div></div>`;
+      analysis = `<div class="card"><h2>Tu rendimiento en días de noticias <small>alto impacto${N.country ? ` · ${esc(N.country)}` : ''}</small></h2>
+        <div class="grid half">${side('Días con noticias', r.news)}${side('Días sin noticias', r.calm)}</div>
+        ${r.byEvent.length ? `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Evento (2 o más días)</th><th class="r">Días</th><th class="r">Neto</th><th class="r">Media por día</th><th class="r">Días ganadores</th></tr></thead><tbody>
+        ${r.byEvent.map((e) => `<tr><td style="white-space:normal">${esc(e.name)}</td><td class="r num">${e.days}</td><td class="r num ${cls(e.net)}"><b>${money(e.net)}</b></td><td class="r num">${money(e.avgDay)}</td><td class="r num">${pct(e.winRate)}</td></tr>`).join('')}</tbody></table></div>` : ''}</div>`;
+    }
+  } else if (wk.coverage === 'week') {
+    analysis = '<div class="notice">El análisis de tu rendimiento en días de noticias necesita historial del calendario. Esta fuente solo tiene la semana en curso.</div>';
+  }
+  el.innerHTML = `<div class="stack"><div class="card"><div class="row" style="justify-content:space-between">${nav}${toolbar}</div>
+    ${wk.error ? `<div class="notice warn" style="margin:12px 0 0">${esc(wk.error)} <button class="btn small" data-action="news-retry">Reintentar</button></div>` : ''}
+    <p class="muted" style="margin:12px 0 0">Fuente: ${esc(wk.source || '')}. ${esc(wk.note || '')}</p></div>
+    ${!wk.error && !days ? '<div class="card empty"><strong>Sin eventos con estos filtros</strong>Prueba con otro impacto, país o semana.</div>' : days}
+    ${analysis}${calcCard()}</div>`;
+}
+
+// ---------- asistente ----------
+function mdLite(text) {
+  const inline = (t) => esc(t).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  const out = []; let list = null, table = null;
+  const flush = () => { if (list) { out.push(`<ul>${list.join('')}</ul>`); list = null; } if (table) { out.push(tableHtml(table)); table = null; } };
+  const tableHtml = (rows) => {
+    const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+    const body = rows.filter((r) => !/^\s*\|?[\s:|-]+\|?\s*$/.test(r));
+    const [head, ...rest] = body;
+    return `<div class="table-wrap"><table><thead><tr>${cells(head).map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${rest.map((r) => `<tr>${cells(r).map((c) => `<td style="white-space:normal">${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  };
+  for (const line of String(text).split('\n')) {
+    if (/^\s*\|/.test(line)) { if (list) flush(); (table ||= []).push(line); continue; }
+    if (table) flush();
+    const li = /^\s*[-*•]\s+(.*)$/.exec(line);
+    if (li) { (list ||= []).push(`<li>${inline(li[1])}</li>`); continue; }
+    if (list) flush();
+    const h = /^#{1,4}\s+(.*)$/.exec(line);
+    if (h) out.push(`<h4>${inline(h[1])}</h4>`);
+    else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  flush();
+  return out.join('');
+}
+/** Resumen compacto del diario para el asistente (solo si el usuario lo activa). */
+function journalSummary(days) {
+  const from = addDays(today(), -days);
+  const list = S.trades.filter((t) => t.status === 'closed' && t.day >= from);
+  const s = summarize(list);
+  const group = (fn) => groupStats(list, fn).map((g) => ({ clave: g.key, operaciones: g.count, neto: Math.round(g.net * 100) / 100, acierto: g.winRate == null ? null : Math.round(g.winRate * 100) }));
+  const ev = evaluateRules(list, S.state.settings.rules, tz());
+  const kinds = {};
+  for (const i of behavioralInsights(list).filter((x) => x.day >= from)) kinds[KIND_LABELS[i.kind]] = (kinds[KIND_LABELS[i.kind]] || 0) + 1;
+  const r2 = (v) => (v == null ? null : Math.round(v * 100) / 100);
+  return {
+    periodo: `${from} a ${today()}`, operaciones: s.count, neto: r2(s.net), acierto: s.winRate == null ? null : Math.round(s.winRate * 100),
+    factorBeneficio: r2(s.profitFactor), expectativaPorOperacion: r2(s.expectancy), gananciaMedia: r2(s.avgWin), perdidaMedia: r2(s.avgLoss),
+    drawdownMaximo: r2(s.maxDrawdown), diasOperados: s.tradingDays,
+    porDiaSemana: group((t) => DOW[weekday(t.day)]), porHoraEntrada: group((t) => `${String(t.hour).padStart(2, '0')}:00`),
+    cumplimientoReglas: { diasCumplidos: ev.stats.okDays, dias: ev.stats.days, resultadoRompiendoReglas: r2(ev.stats.broke.net), operacionesRompiendoReglas: ev.stats.broke.count },
+    patronesDetectados: kinds,
+  };
+}
+const AI_PROMPTS = [
+  ['Analiza el premercado de hoy', 'market'], ['¿Qué noticias importantes hay hoy y esta semana, y cómo pueden mover el NQ?', 'market'],
+  ['¿Cómo cerró ayer el NQ y qué niveles importan hoy?', 'market'], ['Resume mis últimos 30 días y dime qué debo mejorar', 'journal'],
+];
+function aiMessagesHtml() {
+  const A = S.ai;
+  if (!A.messages.length) return '<div class="empty" style="padding:24px"><strong>Pregúntame lo que necesites del mercado</strong>Activa los datos de mercado y pídeme el análisis del premercado, el calendario del día o los niveles del NQ.</div>';
+  return A.messages.map((m, i) => {
+    const last = i === A.messages.length - 1;
+    return m.role === 'user' ? `<div class="bubble me">${esc(m.content).replace(/\n/g, '<br>')}</div>`
+      : `<div class="bubble ai ${m.error ? 'err' : ''}" ${last ? 'id="ai-last"' : ''}>${m.content ? mdLite(m.content) : '<span class="muted">Pensando…</span>'}</div>`;
+  }).join('');
+}
+function viewAssistant(el) {
+  const A = S.ai;
+  if (A.available === null) {
+    if (!globalThis.ASSISTANT) A.available = false;
+    else { globalThis.ASSISTANT.isAvailable().then((ok) => { A.available = ok; if (view() === 'asistente') render(); }); el.innerHTML = '<div class="empty">Comprobando el asistente…</div>'; return; }
+  }
+  if (!A.available) {
+    el.innerHTML = `<div class="card empty"><strong>El asistente no está disponible aquí</strong>Funciona en la página publicada en Claude, donde usa a Claude con datos de mercado reales. En la versión con servidor propio no está incluido.</div>`;
+    return;
+  }
+  el.innerHTML = `<div class="stack"><div class="card"><h2>Qué datos puede usar el asistente</h2>
+      <label class="row" style="flex-wrap:nowrap;align-items:flex-start;margin-bottom:8px"><input type="checkbox" data-ai-toggle="market" ${A.market ? 'checked' : ''}> <span><b>Datos de mercado</b>: velas de precio y calendario económico, consultados a tu conector de Tradezella. Solo envían símbolo, fechas e impacto; no leen tus operaciones, notas ni playbooks. Claude te pedirá permiso la primera vez.</span></label>
+      <label class="row" style="flex-wrap:nowrap;align-items:flex-start"><input type="checkbox" data-ai-toggle="journal" ${A.journal ? 'checked' : ''}> <span><b>Resumen de mi diario</b>: el asistente puede leer un resumen de tus estadísticas de esta app (no tus notas ni las ejecuciones una a una).</span></label></div>
+    <div class="row">${AI_PROMPTS.map(([q, need]) => `<button class="btn small" data-action="ai-prompt" data-q="${esc(q)}" ${A.busy || !A[need] ? 'disabled' : ''} title="${A[need] ? '' : need === 'market' ? 'Activa los datos de mercado' : 'Activa el resumen de tu diario'}">${esc(q)}</button>`).join('')}</div>
+    <div class="card"><div id="ai-chat" class="chat">${aiMessagesHtml()}</div>
+      <div id="ai-status" class="muted" style="min-height:20px;margin-top:8px">${esc(A.status)}</div>
+      <form data-form="ai" class="row" style="flex-wrap:nowrap;align-items:flex-end;margin-top:8px"><textarea name="q" rows="2" style="min-height:44px" placeholder="Pregunta sobre el premercado, el calendario, un nivel o tu operativa…" aria-label="Pregunta" ${A.busy ? 'disabled' : ''}></textarea>
+        ${A.busy ? '<button type="button" class="btn" data-action="ai-stop">Detener</button>' : '<button class="btn primary">Enviar</button>'}</form>
+      <p class="muted" style="margin:8px 0 0;font-size:12px">Análisis educativo con datos reales cuando las herramientas responden; no es una recomendación de inversión. ${A.messages.length ? '<a href="#asistente" data-action="ai-clear">Borrar conversación</a>' : ''}</p></div></div>`;
+  const chat = $('#ai-chat'); if (chat) chat.scrollTop = chat.scrollHeight;
+}
+const AI_ERRORS = {
+  not_granted: 'No has dado permiso para usar Claude en esta página. Recarga y acepta cuando se te pregunte.',
+  sampling_disabled: 'Claude no está disponible para tu cuenta en esta página.',
+  rate_limited: 'Has llegado al límite de uso. Espera un momento antes de preguntar de nuevo.',
+  tools_unavailable: 'Esta vista no permite que el asistente consulte datos. Abre la página en claude.ai.',
+  prompt_too_large: 'La conversación es demasiado larga. Borra la conversación y vuelve a empezar.',
+};
+async function sendAi(raw) {
+  const A = S.ai, q = String(raw || '').trim();
+  if (A.busy || !q) return;
+  A.messages.push({ role: 'user', content: q }, { role: 'assistant', content: '' });
+  A.busy = true; A.status = 'Pensando…'; A.ctl = new AbortController();
+  render();
+  const last = () => A.messages[A.messages.length - 1];
+  const paint = () => { const b = $('#ai-last'); if (b) { b.innerHTML = last().content ? mdLite(last().content) : '<span class="muted">Pensando…</span>'; const c = $('#ai-chat'); if (c) c.scrollTop = c.scrollHeight; } };
+  const history = A.messages.slice(0, -1).map((m) => ({ role: m.role, content: m.error ? '(La respuesta anterior falló.)' : m.content }));
+  try {
+    const r = await globalThis.ASSISTANT.ask(history, {
+      market: A.market, journal: A.journal, journalFn: journalSummary, tz: tz(), signal: A.ctl.signal,
+      onText: ({ text }) => { last().content = text; paint(); },
+      onStatus: (t) => { A.status = t; const s = $('#ai-status'); if (s) s.textContent = t; },
+    });
+    last().content = r.text || last().content;
+    if (r.truncated) last().content += '\n\n_La respuesta se cortó. Pídeme que continúe o que sea más breve._';
+  } catch (e) {
+    if (e?.code === 'cancelled') { if (!last().content) A.messages.splice(-2, 2); }
+    else { last().error = true; last().content = (e?.text ? `${e.text}\n\n` : '') + (AI_ERRORS[e?.code] || 'No se pudo completar la respuesta. Inténtalo de nuevo.'); }
+  } finally {
+    A.busy = false; A.status = ''; A.ctl = null;
+    if (view() === 'asistente') render();
+  }
 }
 
 // ---------- eventos ----------
@@ -602,6 +930,83 @@ document.addEventListener('click', guard(async (ev) => {
     toast(`${root.toUpperCase()} guardado. Los resultados se recalcularon.`); render();
   }
 }));
+
+// acciones de playbooks, noticias, asistente y borrado de datos
+document.addEventListener('click', guard(async (ev) => {
+  const el = ev.target.closest('[data-action]');
+  if (!el) return;
+  const a = el.dataset.action;
+  const D = S.pbDraft;
+  const group = () => D?.groups.find((g) => g.id === el.dataset.gid);
+  if (a === 'pb-new') { S.pbDraft = playbookTemplate(uid); S.pbSel = S.pbDraft.id; S.pbNew = true; render(); }
+  else if (a === 'pb-select') { S.pbSel = el.dataset.id; S.pbDraft = null; S.pbNew = false; render(); }
+  else if (a === 'pb-edit') { S.pbDraft = structuredClone(pbOf(S.pbSel)); S.pbNew = false; render(); }
+  else if (a === 'pb-add-group') { D.groups.push({ id: uid(), name: 'Nuevo grupo', rules: [] }); render(); }
+  else if (a === 'pb-add-rule') { group().rules.push({ id: uid(), text: '' }); render(); }
+  else if (a === 'pb-del-group') { D.groups = D.groups.filter((g) => g.id !== el.dataset.gid); render(); }
+  else if (a === 'pb-del-rule') { for (const g of D.groups) g.rules = g.rules.filter((r) => r.id !== el.dataset.rid); render(); }
+  else if (a === 'pb-cancel') { if (S.pbNew) S.pbSel = null; S.pbDraft = null; S.pbNew = false; render(); }
+  else if (a === 'pb-save') {
+    if (!D.name.trim()) { toast('Ponle un nombre al playbook.'); return; }
+    const all = S.state.settings.playbooks;
+    const list = S.pbNew ? [...all, D] : all.map((p) => (p.id === D.id ? D : p));
+    S.state = await api('PUT', '/api/settings', { playbooks: list });
+    S.pbDraft = null; S.pbNew = false; toast('Playbook guardado.'); render();
+  } else if (a === 'pb-delete') {
+    if (!armed(el, 'Confirmar: eliminar playbook')) return;
+    S.state = await api('PUT', '/api/settings', { playbooks: S.state.settings.playbooks.filter((p) => p.id !== D.id) });
+    S.pbDraft = null; S.pbSel = null; S.pbNew = false; toast('Playbook eliminado.'); render();
+  } else if (a === 'news-enable') { S.news.enabled = true; render(); }
+  else if (a === 'news-week') {
+    const step = Number(el.dataset.step);
+    S.news.weekStart = step === 0 ? mondayOf(today()) : addDays(S.news.weekStart, step * 7);
+    render();
+  } else if (a === 'news-impact') {
+    const k = el.dataset.k, cur = S.news.impacts;
+    S.news.impacts = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+    render();
+  } else if (a === 'news-retry') { S.news.cache.clear(); render(); }
+  else if (a === 'ai-prompt') { await sendAi(el.dataset.q); }
+  else if (a === 'ai-stop') { S.ai.ctl?.abort(); }
+  else if (a === 'ai-clear') { ev.preventDefault(); S.ai.messages = []; render(); }
+  else if (a === 'wipe') {
+    if (!armed(el, 'Confirmar: borrar todo, no se puede deshacer')) return;
+    S.state = await api('DELETE', '/api/data', { confirm: 'BORRAR' });
+    S.trades = await api('GET', '/api/trades');
+    S.openId = null; S.pbSel = null; S.pbDraft = null; S.calMonth = null; S.news.cache.clear();
+    toast('Todos los datos se borraron. Empiezas desde cero.'); render();
+  }
+}));
+
+document.addEventListener('input', (ev) => {
+  const el = ev.target, D = S.pbDraft;
+  if (D && el.dataset.pb) D[el.dataset.pb] = el.value;
+  else if (D && el.dataset.pbGroup) D.groups.find((g) => g.id === el.dataset.pbGroup).name = el.value;
+  else if (D && el.dataset.pbRule) { for (const g of D.groups) for (const r of g.rules) if (r.id === el.dataset.pbRule) r.text = el.value; }
+  else if (el.dataset.calc) { S.calc[el.dataset.calc] = el.value; const o = $('#calc-out'); if (o) o.innerHTML = calcResult(); }
+});
+
+document.addEventListener('change', guard(async (ev) => {
+  const el = ev.target;
+  if ('follow' in el.dataset) {
+    const ids = [...document.querySelectorAll('#drawer [data-follow]:checked')].map((c) => c.value);
+    await saveMeta('followed', ids);
+  } else if (el.dataset.aiToggle) { S.ai[el.dataset.aiToggle] = el.checked; render(); }
+  else if (el.dataset.news === 'country') { S.news.country = el.value; render(); }
+  else if (el.dataset.calc) { S.calc[el.dataset.calc] = el.value; const o = $('#calc-out'); if (o) o.innerHTML = calcResult(); }
+}));
+
+document.addEventListener('submit', guard(async (ev) => {
+  const form = ev.target.closest('[data-form=ai]');
+  if (!form) return;
+  ev.preventDefault();
+  const q = new FormData(form).get('q');
+  form.reset();
+  await sendAi(q);
+}));
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey && ev.target.matches?.('form[data-form=ai] textarea')) { ev.preventDefault(); ev.target.form.requestSubmit(); }
+});
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && ev.target.matches?.('tr[data-action=open]')) openDrawer(ev.target.dataset.id);

@@ -1,17 +1,17 @@
 // Sustituto del servidor para la página publicada: misma API que server/index.js,
 // pero todo corre en el navegador y los datos se guardan en el espacio privado del usuario.
-import { parseTradovateCsv } from './csv.js';
-import { buildTrades } from './engine.js';
-import { parseTimestamp, isValidTz } from './time.js';
-import { DEFAULT_INSTRUMENTS } from './instruments.js';
-import { normalizeRules } from './insights.js';
+import { parseTradovateCsv } from '../server/csv.js';
+import { parseTradezellaCalendar } from '../server/economic.js';
+import { buildTrades } from '../server/engine.js';
+import { parseTimestamp, isValidTz } from '../server/time.js';
+import { DEFAULT_INSTRUMENTS } from '../server/instruments.js';
+import { normalizeRules } from '../public/lib/insights.js';
+import { normalizePlaybooks } from '../public/lib/playbooks.js';
 
 const CHUNK = 1200;
 const LS_KEY = 'diario-de-trading';
 
-const mem = { tz: 'America/New_York', rules: normalizeRules(), instruments: {}, fills: [], meta: {}, days: {} };
-let example = [];          // ejecuciones de ejemplo (nunca se guardan)
-let exampleMeta = {};
+const mem = { tz: 'America/New_York', rules: normalizeRules(), instruments: {}, playbooks: [], fills: [], meta: {}, days: {} };
 let col = null;            // colección privada del usuario en la base de datos
 let storage = 'none';      // 'db' | 'local' | 'none'
 let chunksSaved = 0;
@@ -41,7 +41,7 @@ function write(id, body) {
   queues.set(id, next);
   return next;
 }
-const saveConfig = () => write('config', { tz: mem.tz, rules: mem.rules, instruments: mem.instruments });
+const saveConfig = () => write('config', { tz: mem.tz, rules: mem.rules, instruments: mem.instruments, playbooks: mem.playbooks });
 const saveMeta = () => write('meta', { byId: mem.meta });
 const saveDays = () => write('days', { notes: mem.days });
 async function saveFills() {
@@ -57,8 +57,10 @@ async function saveFills() {
 function absorb(docs) {
   const rows = [];
   for (const [id, d] of docs) {
-    if (id === 'config') { if (isValidTz(d.tz)) mem.tz = d.tz; mem.rules = normalizeRules(d.rules); mem.instruments = d.instruments || {}; }
-    else if (id === 'meta') mem.meta = d.byId || {};
+    if (id === 'config') {
+      if (isValidTz(d.tz)) mem.tz = d.tz;
+      mem.rules = normalizeRules(d.rules); mem.instruments = d.instruments || {}; mem.playbooks = normalizePlaybooks(d.playbooks);
+    } else if (id === 'meta') mem.meta = d.byId || {};
     else if (id === 'days') mem.days = d.notes || {};
     else if (/^fills-\d+$/.test(id)) { rows.push(...(d.rows || [])); chunksSaved = Math.max(chunksSaved, +id.slice(6) + 1); }
   }
@@ -82,66 +84,26 @@ async function init() {
   if (storage === 'none') {
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (raw) { const d = JSON.parse(raw); Object.assign(mem, d, { fills: (d.fills || []).map(unpackFill), rules: normalizeRules(d.rules) }); }
+      if (raw) {
+        const d = JSON.parse(raw);
+        Object.assign(mem, d, { fills: (d.fills || []).map(unpackFill), rules: normalizeRules(d.rules), playbooks: normalizePlaybooks(d.playbooks) });
+      }
       localStorage.setItem(`${LS_KEY}-probe`, '1');
       storage = 'local';
     } catch { storage = 'none'; }
   }
-  if (!mem.fills.length) makeExample();
 }
-
-// ---------- datos de ejemplo ----------
-function makeExample() {
-  let seed = 42;
-  const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
-  const specs = { MNQ: [20500, 0.25, 1, 0.79], MES: [5900, 0.25, 0.25, 0.79], MGC: [2650, 0.1, 0.15, 1.09] };
-  const now = new Date();
-  const letter = 'FGHJKMNQUVXZ'[[2, 2, 2, 5, 5, 5, 8, 8, 8, 11, 11, 11][now.getUTCMonth()]];
-  const suffix = `${letter}${now.getUTCFullYear() % 10}`;
-  const fills = [];
-  let n = 0;
-  for (let back = 75; back >= 1; back--) {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - back));
-    if ([0, 6].includes(d.getUTCDay()) || rnd() < 0.12) continue;
-    const count = 1 + Math.floor(rnd() * 4);
-    let clock = 14 * 3600 + 35 * 60;
-    for (let k = 0; k < count; k++) {
-      const root = rnd() < 0.6 ? 'MNQ' : rnd() < 0.7 ? 'MES' : 'MGC';
-      const [base, tick, scale, fee] = specs[root];
-      const qty = 1 + Math.floor(rnd() * 3), long = rnd() < 0.55;
-      const entry = Math.round((base + (rnd() - 0.5) * base * 0.03) / tick) * tick;
-      const move = Math.round(((rnd() < 0.56 ? 8 + rnd() * 40 : -(6 + rnd() * 28)) * scale) / tick) * tick;
-      const exit = entry + (long ? move : -move);
-      clock += 120 + Math.floor(rnd() * 3600);
-      const dur = 20 + Math.floor(rnd() * rnd() * 2400);
-      const at = (s) => new Date(d.getTime() + s * 1000).toISOString();
-      const mk = (side, price, ts) => ({ id: `ej-${++n}`, account: 'Ejemplo', contract: root + suffix, side, qty, price: +price.toFixed(2), ts, fee: fee * qty, source: 'manual' });
-      fills.push(mk(long ? 'B' : 'S', entry, at(clock)), mk(long ? 'S' : 'B', exit, at(clock + dur)));
-      clock += dur;
-    }
-  }
-  example = fills;
-  exampleMeta = {};
-  const names = ['Ruptura de apertura', 'Reversión a VWAP', 'Continuación de tendencia'];
-  buildTrades(fills, new Map(instrumentList().map((i) => [i.root, i])), mem.tz).forEach((t, i) => {
-    if (i % 2) return;
-    exampleMeta[t.id] = {
-      strategy: names[i % 3], tags: [i % 4 ? 'A+' : 'B'], mistakes: t.net < 0 && i % 3 ? ['Entrada tardía'] : [],
-      stop: t.entryPrice + (t.side === 'long' ? -12 : 12) * (t.root === 'MNQ' ? 1 : 0.25), notes: i % 6 ? '' : 'Buena lectura del contexto.',
-    };
-  });
-}
-const usingExample = () => example.length > 0;
-function dropExample() { if (usingExample()) { example = []; exampleMeta = {}; cache = null; } }
 
 // ---------- operaciones ----------
 function trades() {
   if (cache) return cache;
   const inst = new Map(instrumentList().map((i) => [i.root, i]));
-  const metas = usingExample() ? exampleMeta : mem.meta;
-  cache = buildTrades(usingExample() ? example : mem.fills, inst, mem.tz).map((t) => {
-    const m = metas[t.id] || {};
-    return { ...t, notes: m.notes || '', strategy: m.strategy || '', tags: m.tags || [], mistakes: m.mistakes || [], stop: m.stop ?? null, shots: [] };
+  cache = buildTrades(mem.fills, inst, mem.tz).map((t) => {
+    const m = mem.meta[t.id] || {};
+    return {
+      ...t, notes: m.notes || '', strategy: m.strategy || '', tags: m.tags || [], mistakes: m.mistakes || [],
+      stop: m.stop ?? null, shots: [], playbook: m.playbook || '', followed: m.followed || [],
+    };
   });
   return cache;
 }
@@ -155,9 +117,9 @@ function addFills(list) {
 
 function state() {
   return {
-    settings: { tz: mem.tz, rules: mem.rules }, instruments: instrumentList(), days: usingExample() ? {} : mem.days,
-    sync: { configured: false }, fills: mem.fills.length, passwordProtected: false, example: usingExample(),
-    features: { shots: false, sync: false },
+    settings: { tz: mem.tz, rules: mem.rules, playbooks: mem.playbooks }, instruments: instrumentList(), days: mem.days,
+    sync: { configured: false }, fills: mem.fills.length, passwordProtected: false,
+    features: { shots: false, sync: false, economicConsent: true },
     storageNote: storage === 'db' ? '' : storage === 'local'
       ? 'No se pudo abrir tu espacio de datos en Claude, así que los cambios se guardan solo en este navegador.'
       : 'No hay dónde guardar en esta vista: los cambios se perderán al cerrar la página.',
@@ -165,16 +127,43 @@ function state() {
   };
 }
 
+const MCP_ERRORS = {
+  needs_reauth: 'Vuelve a conectar Tradezella en Claude (Ajustes → Conectores) y reintenta.',
+  server_not_connected: 'No tienes el conector de Tradezella añadido en Claude, así que el calendario no está disponible.',
+  approval_required: 'Hace falta tu permiso para consultar el calendario. Pulsa el botón de nuevo y acéptalo cuando Claude lo pida.',
+  blocked_by_policy: 'Tu organización no permite este conector.',
+};
+
+/** Calendario económico desde el conector de Tradezella. Solo pide fechas, impacto y país: nunca lee tus operaciones. */
+async function economic(q) {
+  const base = { source: 'Tradezella', coverage: 'range', note: 'Las horas están en la zona horaria configurada en tu cuenta de Tradezella.' };
+  let mcp = null;
+  try { mcp = await globalThis.claude?.use?.('mcp'); } catch { mcp = null; }
+  if (!mcp) return { ...base, events: [], error: 'Esta vista no puede conectarse a Tradezella. Abre la página en claude.ai para usar el calendario.' };
+  const input = { start_date: q.get('from'), end_date: q.get('to') };
+  if (q.get('impact')) input.impact = q.get('impact');
+  if (q.get('countries')) input.countries = q.get('countries');
+  try {
+    const r = await mcp.callTool('Tradezella', 'get_economic_calendar', input);
+    const text = typeof r?.payload === 'string' ? r.payload
+      : (r?.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+    return { ...base, events: parseTradezellaCalendar(text) };
+  } catch (e) {
+    return { ...base, events: [], error: MCP_ERRORS[e?.code] || `No se pudo consultar el calendario de Tradezella (${e?.code || 'error'}).` };
+  }
+}
+
 async function handle(method, url, body = {}) {
   await (ready ||= init());
-  const p = url.replace(/^\/api/, '');
+  const [path, qs] = url.split('?');
+  const p = path.replace(/^\/api/, '');
   let m;
   if (p === '/state' && method === 'GET') return state();
   if (p === '/trades' && method === 'GET') return trades();
+  if (p === '/economic' && method === 'GET') return economic(new URLSearchParams(qs || ''));
 
   if (p === '/import' && method === 'POST') {
     const parsed = parseTradovateCsv(body.csv || '', { tz: mem.tz, account: String(body.account || '').trim() || 'Tradovate' });
-    dropExample();
     const known = new Set(instrumentList().map((i) => i.root));
     const newInstruments = [];
     for (const [root, mult] of Object.entries(parsed.derivedMultipliers)) {
@@ -199,7 +188,6 @@ async function handle(method, url, body = {}) {
     const fee = body.fees !== '' && body.fees != null && isFinite(fees) && fees >= 0 ? fees / 2 : null;
     const id = `m-${crypto.randomUUID()}`;
     const account = String(body.account || '').trim() || 'Manual';
-    dropExample();
     addFills([
       { id: `${id}-a`, account, contract, side: long ? 'B' : 'S', qty, price: entry, ts: t0.toISOString(), fee, source: 'manual' },
       { id: `${id}-b`, account, contract, side: long ? 'S' : 'B', qty, price: exit, ts: t1.toISOString(), fee, source: 'manual' },
@@ -212,7 +200,6 @@ async function handle(method, url, body = {}) {
     const id = decodeURIComponent(m[1]);
     const t = trades().find((x) => x.id === id) || fail('Operación no encontrada.');
     const gone = new Set(t.legs.map((l) => l.id));
-    if (usingExample()) { example = example.filter((f) => !gone.has(f.id)); cache = null; return { ok: true }; }
     mem.fills = mem.fills.filter((f) => !gone.has(f.id));
     delete mem.meta[id];
     cache = null;
@@ -223,22 +210,22 @@ async function handle(method, url, body = {}) {
   if ((m = /^\/trades\/([^/]+)\/meta$/.exec(p)) && method === 'PUT') {
     const id = decodeURIComponent(m[1]);
     const t = trades().find((x) => x.id === id) || fail('Operación no encontrada.');
-    const list = (v) => [...new Set((Array.isArray(v) ? v : []).map((x) => String(x).trim()).filter(Boolean))].slice(0, 30);
-    const next = {
+    const list = (v, max = 30) => [...new Set((Array.isArray(v) ? v : []).map((x) => String(x).trim()).filter(Boolean))].slice(0, max);
+    mem.meta[id] = {
       notes: body.notes !== undefined ? String(body.notes).slice(0, 20000) : t.notes,
       strategy: body.strategy !== undefined ? String(body.strategy).trim().slice(0, 80) : t.strategy,
       tags: body.tags !== undefined ? list(body.tags) : t.tags,
       mistakes: body.mistakes !== undefined ? list(body.mistakes) : t.mistakes,
       stop: body.stop !== undefined ? (body.stop === null || body.stop === '' || !isFinite(+body.stop) ? null : +body.stop) : t.stop,
+      playbook: body.playbook !== undefined ? String(body.playbook).trim().slice(0, 40) : t.playbook,
+      followed: body.followed !== undefined ? list(body.followed, 100) : t.followed,
     };
-    (usingExample() ? exampleMeta : mem.meta)[id] = next;
     cache = null;
-    if (!usingExample()) await saveMeta();
+    await saveMeta();
     return trades().find((x) => x.id === id);
   }
 
   if ((m = /^\/days\/(\d{4}-\d{2}-\d{2})$/.exec(p)) && method === 'PUT') {
-    if (usingExample()) fail('Importa tus operaciones para guardar notas del día.');
     const notes = String(body.notes ?? '').slice(0, 20000);
     if (notes) mem.days[m[1]] = notes; else delete mem.days[m[1]];
     await saveDays();
@@ -250,6 +237,7 @@ async function handle(method, url, body = {}) {
       mem.tz = body.tz; cache = null;
     }
     if (body.rules !== undefined) mem.rules = normalizeRules(body.rules);
+    if (body.playbooks !== undefined) mem.playbooks = normalizePlaybooks(body.playbooks);
     await saveConfig();
     return state();
   }
@@ -262,6 +250,17 @@ async function handle(method, url, body = {}) {
     mem.instruments[root] = { name: mem.instruments[root]?.name || '', multiplier, fee };
     cache = null;
     await saveConfig();
+    return state();
+  }
+  // Borra operaciones, notas y playbooks. Los ajustes (zona horaria, instrumentos, reglas) se conservan.
+  if (p === '/data' && method === 'DELETE') {
+    if (body.confirm !== 'BORRAR') fail('Falta la confirmación.');
+    mem.fills = []; mem.meta = {}; mem.days = {}; mem.playbooks = [];
+    // vuelve a los instrumentos por defecto (conserva las comisiones de esos)
+    const keep = new Set(DEFAULT_INSTRUMENTS.map((i) => i[0]));
+    mem.instruments = Object.fromEntries(Object.entries(mem.instruments).filter(([root]) => keep.has(root)));
+    cache = null;
+    await Promise.all([saveFills(), saveMeta(), saveDays(), saveConfig()]);
     return state();
   }
   fail('Esta función no está disponible en esta página.');

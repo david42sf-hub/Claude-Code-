@@ -3,6 +3,7 @@ import { DEFAULT_INSTRUMENTS, rootOf } from './instruments.js';
 import { buildTrades } from './engine.js';
 import { isValidTz } from './time.js';
 import { normalizeRules } from '../public/lib/insights.js';
+import { normalizePlaybooks } from '../public/lib/playbooks.js';
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -14,7 +15,7 @@ CREATE TABLE IF NOT EXISTS fills (
 CREATE TABLE IF NOT EXISTS trade_meta (
   trade_id TEXT PRIMARY KEY, notes TEXT NOT NULL DEFAULT '', strategy TEXT NOT NULL DEFAULT '',
   tags TEXT NOT NULL DEFAULT '[]', mistakes TEXT NOT NULL DEFAULT '[]', stop REAL,
-  shots TEXT NOT NULL DEFAULT '[]'
+  shots TEXT NOT NULL DEFAULT '[]', playbook TEXT NOT NULL DEFAULT '', followed TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS days (day TEXT PRIMARY KEY, notes TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -29,6 +30,10 @@ export class Store {
   constructor(file) {
     this.db = new DatabaseSync(file);
     this.db.exec(SCHEMA);
+    // bases creadas antes de los playbooks: añade las columnas que falten
+    const cols = new Set(this.db.prepare('PRAGMA table_info(trade_meta)').all().map((c) => c.name));
+    if (!cols.has('playbook')) this.db.exec("ALTER TABLE trade_meta ADD COLUMN playbook TEXT NOT NULL DEFAULT ''");
+    if (!cols.has('followed')) this.db.exec("ALTER TABLE trade_meta ADD COLUMN followed TEXT NOT NULL DEFAULT '[]'");
     const ins = this.db.prepare('INSERT OR IGNORE INTO instruments (root, name, multiplier, fee) VALUES (?,?,?,0)');
     for (const [root, name, mult] of DEFAULT_INSTRUMENTS) ins.run(root, name, mult);
     this.cache = null;
@@ -39,6 +44,7 @@ export class Store {
     const out = { ...DEFAULT_SETTINGS };
     for (const r of this.db.prepare('SELECT key, value FROM settings').all()) out[r.key] = JSON.parse(r.value);
     out.rules = normalizeRules(out.rules);
+    out.playbooks = normalizePlaybooks(out.playbooks);
     return out;
   }
   setSettings(patch) {
@@ -48,6 +54,7 @@ export class Store {
       put.run('tz', JSON.stringify(patch.tz));
     }
     if (patch.rules !== undefined) put.run('rules', JSON.stringify(normalizeRules(patch.rules)));
+    if (patch.playbooks !== undefined) put.run('playbooks', JSON.stringify(normalizePlaybooks(patch.playbooks)));
     this.cache = null;
   }
 
@@ -116,6 +123,7 @@ export class Store {
         notes: m?.notes || '', strategy: m?.strategy || '',
         tags: m ? JSON.parse(m.tags) : [], mistakes: m ? JSON.parse(m.mistakes) : [],
         stop: m?.stop ?? null, shots: m ? JSON.parse(m.shots) : [],
+        playbook: m?.playbook || '', followed: m ? JSON.parse(m.followed) : [],
       };
     });
     return this.cache;
@@ -125,7 +133,7 @@ export class Store {
   setMeta(id, patch) {
     const t = this.trade(id);
     if (!t) throw new Error('Operación no encontrada.');
-    const list = (v) => [...new Set((Array.isArray(v) ? v : []).map((x) => String(x).trim()).filter(Boolean))].slice(0, 30);
+    const list = (v, max = 30) => [...new Set((Array.isArray(v) ? v : []).map((x) => String(x).trim()).filter(Boolean))].slice(0, max);
     const next = {
       notes: patch.notes !== undefined ? String(patch.notes).slice(0, 20000) : t.notes,
       strategy: patch.strategy !== undefined ? String(patch.strategy).trim().slice(0, 80) : t.strategy,
@@ -133,11 +141,14 @@ export class Store {
       mistakes: patch.mistakes !== undefined ? list(patch.mistakes) : t.mistakes,
       stop: patch.stop !== undefined ? (patch.stop === null || patch.stop === '' || !isFinite(+patch.stop) ? null : +patch.stop) : t.stop,
       shots: patch.shots !== undefined ? patch.shots : t.shots,
+      playbook: patch.playbook !== undefined ? String(patch.playbook).trim().slice(0, 40) : t.playbook,
+      followed: patch.followed !== undefined ? list(patch.followed, 100) : t.followed,
     };
-    this.db.prepare(`INSERT INTO trade_meta (trade_id, notes, strategy, tags, mistakes, stop, shots) VALUES (?,?,?,?,?,?,?)
+    this.db.prepare(`INSERT INTO trade_meta (trade_id, notes, strategy, tags, mistakes, stop, shots, playbook, followed) VALUES (?,?,?,?,?,?,?,?,?)
       ON CONFLICT(trade_id) DO UPDATE SET notes = excluded.notes, strategy = excluded.strategy, tags = excluded.tags,
-        mistakes = excluded.mistakes, stop = excluded.stop, shots = excluded.shots`)
-      .run(id, next.notes, next.strategy, JSON.stringify(next.tags), JSON.stringify(next.mistakes), next.stop, JSON.stringify(next.shots));
+        mistakes = excluded.mistakes, stop = excluded.stop, shots = excluded.shots, playbook = excluded.playbook, followed = excluded.followed`)
+      .run(id, next.notes, next.strategy, JSON.stringify(next.tags), JSON.stringify(next.mistakes), next.stop, JSON.stringify(next.shots),
+        next.playbook, JSON.stringify(next.followed));
     this.cache = null;
     return this.trade(id);
   }
@@ -150,6 +161,21 @@ export class Store {
     this.db.prepare('DELETE FROM trade_meta WHERE trade_id = ?').run(id);
     this.cache = null;
     return t;
+  }
+
+  /** Borra operaciones, notas del día, playbooks y metadatos. Conserva zona horaria, reglas y los instrumentos por defecto. Devuelve los nombres de las capturas. */
+  deleteAllData() {
+    const shots = this.db.prepare('SELECT shots FROM trade_meta').all().flatMap((r) => JSON.parse(r.shots));
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM fills; DELETE FROM trade_meta; DELETE FROM days;');
+      this.db.prepare("DELETE FROM settings WHERE key = 'playbooks'").run();
+      const keep = DEFAULT_INSTRUMENTS.map((i) => i[0]);
+      this.db.prepare(`DELETE FROM instruments WHERE root NOT IN (${keep.map(() => '?').join(',')})`).run(...keep);
+      this.db.exec('COMMIT');
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    this.cache = null;
+    return shots;
   }
 
   // --- diario ---

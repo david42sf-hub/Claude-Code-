@@ -98,6 +98,20 @@ export function durationBucket(t) {
   return DURATION_BUCKETS.find(([, max]) => s < max)[0];
 }
 
+/** Resultado por día de la semana y hora de entrada. */
+export function heatmap(trades) {
+  const cells = new Map();
+  for (const t of trades) {
+    if (t.status !== 'closed') continue;
+    const dow = weekday(t.day), key = `${dow}-${t.hour}`;
+    let c = cells.get(key);
+    if (!c) { c = { dow, hour: t.hour, net: 0, count: 0, wins: 0 }; cells.set(key, c); }
+    c.net += t.net; c.count++;
+    if (t.net > 0) c.wins++;
+  }
+  return [...cells.values()];
+}
+
 /** Día de la semana (0 = domingo) de una clave "YYYY-MM-DD". */
 export function weekday(day) {
   const [y, m, d] = day.split('-').map(Number);
