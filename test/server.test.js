@@ -117,6 +117,38 @@ test('borrar todos los datos deja la app vacía y conserva los ajustes', async (
   } finally { app.close(); }
 });
 
+test('borrar operaciones en masa y borrar un archivo importado entero', async () => {
+  const app = await boot();
+  try {
+    const csv2 = [
+      'symbol,buyFillId,sellFillId,qty,buyPrice,sellPrice,pnl,boughtTimestamp,soldTimestamp',
+      'MNQZ6,301,302,1,20000.00,20010.00,$20.00,11/16/2026 09:30:00,11/16/2026 09:35:00',
+      'MNQZ6,303,304,2,20000.00,20005.00,$20.00,11/16/2026 10:00:00,11/16/2026 10:05:00',
+    ].join('\n');
+    await app.call('POST', '/api/import', { csv: CSV, account: 'Real', name: 'lunes.csv' });
+    await app.call('POST', '/api/import', { csv: csv2, account: 'Real', name: 'martes.csv' });
+    let r = await app.call('GET', '/api/state');
+    assert.deepEqual(r.body.imports.map((i) => [i.name, i.fills]), [['martes.csv', 4], ['lunes.csv', 4]]);   // más reciente primero
+    assert.equal((await app.call('POST', '/api/import', { csv: csv2, account: 'Real', name: 'repetido.csv' })).body.added, 0);
+    assert.equal((await app.call('GET', '/api/state')).body.imports.length, 2);                              // un archivo sin novedades no se registra
+
+    const trades = (await app.call('GET', '/api/trades')).body;
+    assert.equal(trades.length, 4);
+    const [a, b] = trades.filter((t) => t.root === 'MNQ');
+    await app.call('PUT', `/api/trades/${a.id}/meta`, { notes: 'x' });
+    assert.equal((await app.call('POST', '/api/trades/delete', { ids: [] })).status, 400);
+    r = await app.call('POST', '/api/trades/delete', { ids: [a.id, b.id, 'no-existe'] });
+    assert.deepEqual(r.body, { deleted: 2 });
+    assert.equal((await app.call('GET', '/api/trades')).body.length, 2);
+    assert.deepEqual((await app.call('GET', '/api/state')).body.imports.map((i) => [i.name, i.fills]), [['martes.csv', 2], ['lunes.csv', 2]]);
+
+    r = await app.call('DELETE', `/api/imports/${(await app.call('GET', '/api/state')).body.imports[0].id}`);   // borra martes.csv
+    assert.deepEqual(r.body, { fills: 2, trades: 1 });
+    assert.deepEqual((await app.call('GET', '/api/trades')).body.map((t) => t.root), ['ES']);
+    assert.deepEqual((await app.call('GET', '/api/state')).body.imports.map((i) => i.name), ['lunes.csv']);
+  } finally { app.close(); }
+});
+
 test('archivos estáticos sin salir de la carpeta pública', async () => {
   const app = await boot();
   try {

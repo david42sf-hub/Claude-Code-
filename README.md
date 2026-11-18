@@ -69,6 +69,11 @@ Para que sincronice sin tener tu computadora encendida, despliégala en un servi
 
 Al publicarla con Claude se declaran los permisos `db`, `user`, `sample` y `mcp` (conector de Tradezella, solo las herramientas `get_market_data` y `get_economic_calendar`). Esas consultas envían símbolo, fechas e impacto; nunca operaciones, notas ni playbooks. En la versión con servidor, el calendario usa un feed público gratuito de la semana en curso y el asistente no está disponible.
 
+## Borrar operaciones
+
+- En **Operaciones** marca varias casillas (o **Seleccionar las N del filtro**) y pulsa **Eliminar seleccionadas**. Combínalo con el filtro de periodo para borrar un día o un mes entero.
+- En **Importar → Archivos importados** cada CSV queda registrado con su fecha; **Eliminar** borra todas sus ejecuciones y las operaciones que forman, con sus notas. Las ejecuciones importadas antes de existir este registro aparecen juntas como "Importaciones anteriores".
+
 ## Borrar los datos
 
 Ajustes → **Borrar todos los datos** elimina operaciones, notas, capturas y playbooks, y deja solo NQ y MNQ como instrumentos. Conserva la zona horaria, las reglas y las comisiones de NQ y MNQ.

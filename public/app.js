@@ -34,7 +34,7 @@ let S = {
   state: null, trades: [], needLogin: false,
   filter: { range: 'all', from: '', to: '', account: '', symbol: '', side: '' },
   sort: { key: 'time', dir: -1 }, calMonth: null, reportTab: 'symbol', openId: null, page: 1,
-  pbSel: null, pbDraft: null, pbNew: false,
+  pbSel: null, pbDraft: null, pbNew: false, sel: new Set(),
   news: { weekStart: null, impacts: ['high', 'medium'], country: null, cache: new Map(), enabled: false },
   ai: { messages: [], busy: false, market: false, journal: false, status: '', ctl: null, available: null },
 };
@@ -67,6 +67,8 @@ function toast(msg) {
 }
 async function load() {
   [S.state, S.trades] = await Promise.all([api('GET', '/api/state'), api('GET', '/api/trades')]);
+  const ids = new Set(S.trades.map((t) => t.id));
+  for (const id of [...S.sel]) if (!ids.has(id)) S.sel.delete(id);
   S.needLogin = false;
 }
 async function reload() { await load(); render(); }
@@ -259,6 +261,7 @@ function tradeRows(list) {
   return list.map((t) => {
     const r = rMultiple(t);
     return `<tr class="click" data-action="open" data-id="${esc(t.id)}" tabindex="0">
+      <td><input type="checkbox" data-sel="${esc(t.id)}" ${S.sel.has(t.id) ? 'checked' : ''} aria-label="Seleccionar operación"></td>
       <td class="num">${fmtTime(t.exitTs || t.entryTs)}</td><td>${esc(t.contract)}</td>
       <td><span class="pill ${t.side}">${t.side === 'long' ? 'Largo' : 'Corto'}</span>${t.status === 'open' ? ' <span class="pill open">Abierta</span>' : ''}</td>
       <td class="r num">${num(t.qty, 0)}</td><td class="r num">${price(t.entryPrice)}</td><td class="r num">${price(t.exitPrice)}</td>
@@ -275,9 +278,14 @@ function viewTrades(el) {
   if (!list.length) { el.innerHTML = noMatch(); return; }
   const s = summarize(list);
   const shown = list.slice(0, S.page * PAGE);
+  const n = S.sel.size, allShown = shown.length > 0 && shown.every((t) => S.sel.has(t.id));
+  const bar = `<div class="row" style="margin-bottom:10px"><span class="muted">${n ? `${n} seleccionada${n === 1 ? '' : 's'}` : 'Marca casillas para borrar varias a la vez'}</span>
+    <button class="btn small" data-action="sel-filtered">Seleccionar las ${list.length} del filtro</button>
+    ${n ? '<button class="btn small" data-action="sel-clear">Quitar selección</button><button class="btn small danger" data-action="del-selected">Eliminar seleccionadas</button>' : ''}</div>`;
   el.innerHTML = `<div class="card">
     <h2>${list.length} operaciones <small class="num">neto <b class="${cls(s.net)}">${money(s.net)}</b></small></h2>
-    <div class="table-wrap"><table><thead><tr>${COLS.map(([k, l, , c]) => `<th class="${c || ''}" aria-sort="${S.sort.key === k ? (S.sort.dir > 0 ? 'ascending' : 'descending') : 'none'}"><button data-action="sort" data-key="${k}">${l}${S.sort.key === k ? (S.sort.dir > 0 ? ' ↑' : ' ↓') : ''}</button></th>`).join('')}</tr></thead>
+    ${bar}
+    <div class="table-wrap"><table><thead><tr><th><input type="checkbox" data-sel-all ${allShown ? 'checked' : ''} aria-label="Seleccionar las operaciones visibles"></th>${COLS.map(([k, l, , c]) => `<th class="${c || ''}" aria-sort="${S.sort.key === k ? (S.sort.dir > 0 ? 'ascending' : 'descending') : 'none'}"><button data-action="sort" data-key="${k}">${l}${S.sort.key === k ? (S.sort.dir > 0 ? ' ↑' : ' ↓') : ''}</button></th>`).join('')}</tr></thead>
     <tbody>${tradeRows(shown)}</tbody></table></div>
     ${shown.length < list.length ? `<div style="text-align:center;margin-top:12px"><button class="btn" data-action="more">Mostrar más (${list.length - shown.length} restantes)</button></div>` : ''}</div>`;
 }
@@ -560,6 +568,7 @@ function viewImport(el) {
         <li>Súbelo aquí. Puedes repetir la importación: las ejecuciones ya cargadas no se duplican.</li></ol>
       <div class="form-grid" style="margin-bottom:12px"><label class="field">Nombre de la cuenta<input type="text" id="imp-account" value="${esc(accounts[0] || 'Tradovate')}"></label></div>
       <label class="drop" id="drop">Arrastra el archivo CSV aquí o haz clic para elegirlo<input type="file" accept=".csv,text/csv" data-upload="csv" multiple></label>
+      ${importsCard()}
       <p class="muted" style="margin-bottom:0">Las horas del archivo se interpretan en la zona horaria <b>${esc(tz())}</b> (cámbiala en Ajustes si no coincide con la de tu Tradovate).</p></div>
     ${syncCard()}
     <div class="card"><h2>Registrar una operación manual</h2>
@@ -575,11 +584,20 @@ function viewImport(el) {
         <label class="field">Cuenta<input name="account" type="text" value="${esc(accounts[0] || 'Tradovate')}"></label>
       </div><div><button class="btn primary">Guardar operación</button></div></form></div></div>`;
 }
+function importsCard() {
+  const list = S.state.imports || [];
+  if (!list.length) return '';
+  return `<div style="margin:16px 0"><h3 style="margin-bottom:8px">Archivos importados</h3>
+    <div class="table-wrap"><table><thead><tr><th>Archivo</th><th>Importado</th><th class="r">Ejecuciones</th><th></th></tr></thead><tbody>
+    ${list.map((i) => `<tr><td style="white-space:normal">${esc(i.name)}</td><td class="num">${i.at ? fmtTime(i.at) : '<span class="muted">antes del registro</span>'}</td><td class="r num">${i.fills}</td>
+      <td class="r"><button class="btn small danger" data-action="del-import" data-id="${esc(i.id)}" data-n="${i.fills}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>
+    <p class="muted" style="margin:8px 0 0">Eliminar un archivo borra todas sus ejecuciones y las operaciones que se forman con ellas, con sus notas. Si una operación tenía ejecuciones en dos archivos, la otra mitad queda como posición abierta.</p></div>`;
+}
 async function importFiles(files) {
   const account = $('#imp-account')?.value || 'Tradovate';
   for (const f of files) {
     try {
-      const r = await api('POST', '/api/import', { csv: await readFile(f, 'text'), account });
+      const r = await api('POST', '/api/import', { csv: await readFile(f, 'text'), account, name: f.name });
       const extra = [...r.warnings, r.newInstruments.length ? `Instrumentos nuevos: ${r.newInstruments.join(', ')}.` : '',
         r.unknown.length ? `Revisa el valor por punto de ${r.unknown.join(', ')} en Ajustes.` : ''].filter(Boolean).join(' ');
       toast(`${f.name}: ${r.added} ejecución(es) nueva(s), ${r.duplicates} repetida(s). ${extra}`);
@@ -889,7 +907,7 @@ document.addEventListener('click', guard(async (ev) => {
   const el = ev.target.closest('[data-action]');
   if (!el) return;
   const a = el.dataset.action;
-  if (a === 'open') { openDrawer(el.dataset.id); }
+  if (a === 'open') { if (!ev.target.closest('[data-sel]')) openDrawer(el.dataset.id); }
   else if (a === 'close') { $('#drawer').close(); }
   else if (a === 'sort') { S.sort = { key: el.dataset.key, dir: S.sort.key === el.dataset.key ? -S.sort.dir : -1 }; render(); }
   else if (a === 'more') { S.page++; render(); }
@@ -958,6 +976,21 @@ document.addEventListener('click', guard(async (ev) => {
     if (!armed(el, 'Confirmar: eliminar playbook')) return;
     S.state = await api('PUT', '/api/settings', { playbooks: S.state.settings.playbooks.filter((p) => p.id !== D.id) });
     S.pbDraft = null; S.pbSel = null; S.pbNew = false; toast('Playbook eliminado.'); render();
+  } else if (a === 'sel-filtered') { for (const t of filtered()) S.sel.add(t.id); render(); }
+  else if (a === 'sel-clear') { S.sel.clear(); render(); }
+  else if (a === 'del-selected') {
+    const n = S.sel.size;
+    if (!armed(el, `Confirmar: eliminar ${n} ${n === 1 ? 'operación' : 'operaciones'} para siempre`)) return;
+    const r = await api('POST', '/api/trades/delete', { ids: [...S.sel] });
+    S.sel.clear(); S.openId = null;
+    toast(r.deleted === 1 ? '1 operación eliminada.' : `${r.deleted} operaciones eliminadas.`);
+    await reload();
+  } else if (a === 'del-import') {
+    if (!armed(el, `Confirmar: borrar ${el.dataset.n} ejecuciones`)) return;
+    const r = await api('DELETE', `/api/imports/${encodeURIComponent(el.dataset.id)}`);
+    S.sel.clear(); S.openId = null; S.calMonth = null;
+    toast(`Archivo eliminado: ${r.fills} ${r.fills === 1 ? 'ejecución' : 'ejecuciones'} y ${r.trades} ${r.trades === 1 ? 'operación' : 'operaciones'}.`);
+    await reload();
   } else if (a === 'news-enable') { S.news.enabled = true; render(); }
   else if (a === 'news-week') {
     const step = Number(el.dataset.step);
@@ -990,7 +1023,12 @@ document.addEventListener('input', (ev) => {
 
 document.addEventListener('change', guard(async (ev) => {
   const el = ev.target;
-  if ('follow' in el.dataset) {
+  if ('sel' in el.dataset) { if (el.checked) S.sel.add(el.dataset.sel); else S.sel.delete(el.dataset.sel); render(); }
+  else if ('selAll' in el.dataset) {
+    const ids = [...document.querySelectorAll('tbody [data-sel]')].map((c) => c.dataset.sel);
+    for (const id of ids) { if (el.checked) S.sel.add(id); else S.sel.delete(id); }
+    render();
+  } else if ('follow' in el.dataset) {
     const ids = [...document.querySelectorAll('#drawer [data-follow]:checked')].map((c) => c.value);
     await saveMeta('followed', ids);
   } else if (el.dataset.aiToggle) { S.ai[el.dataset.aiToggle] = el.checked; render(); }

@@ -11,7 +11,7 @@ import { normalizePlaybooks } from '../public/lib/playbooks.js';
 const CHUNK = 1200;
 const LS_KEY = 'diario-de-trading';
 
-const mem = { tz: 'America/New_York', rules: normalizeRules(), instruments: {}, playbooks: [], fills: [], meta: {}, days: {} };
+const mem = { tz: 'America/New_York', rules: normalizeRules(), instruments: {}, playbooks: [], fills: [], meta: {}, days: {}, imports: [] };
 let col = null;            // colección privada del usuario en la base de datos
 let storage = 'none';      // 'db' | 'local' | 'none'
 let chunksSaved = 0;
@@ -19,8 +19,8 @@ let cache = null;
 let ready = null;
 
 const fail = (msg) => { throw new Error(msg); };
-const packFill = (f) => [f.id, f.account, f.contract, f.side, f.qty, f.price, f.ts, f.fee, f.source];
-const unpackFill = (a) => ({ id: a[0], account: a[1], contract: a[2], side: a[3], qty: a[4], price: a[5], ts: a[6], fee: a[7] ?? null, source: a[8] });
+const packFill = (f) => [f.id, f.account, f.contract, f.side, f.qty, f.price, f.ts, f.fee, f.source, f.batch || ''];
+const unpackFill = (a) => ({ id: a[0], account: a[1], contract: a[2], side: a[3], qty: a[4], price: a[5], ts: a[6], fee: a[7] ?? null, source: a[8], batch: a[9] ?? '' });
 
 function instrumentList() {
   const map = new Map(DEFAULT_INSTRUMENTS.map(([root, name, multiplier]) => [root, { root, name, multiplier, fee: 0 }]));
@@ -41,7 +41,7 @@ function write(id, body) {
   queues.set(id, next);
   return next;
 }
-const saveConfig = () => write('config', { tz: mem.tz, rules: mem.rules, instruments: mem.instruments, playbooks: mem.playbooks });
+const saveConfig = () => write('config', { tz: mem.tz, rules: mem.rules, instruments: mem.instruments, playbooks: mem.playbooks, imports: mem.imports });
 const saveMeta = () => write('meta', { byId: mem.meta });
 const saveDays = () => write('days', { notes: mem.days });
 async function saveFills() {
@@ -60,6 +60,7 @@ function absorb(docs) {
     if (id === 'config') {
       if (isValidTz(d.tz)) mem.tz = d.tz;
       mem.rules = normalizeRules(d.rules); mem.instruments = d.instruments || {}; mem.playbooks = normalizePlaybooks(d.playbooks);
+      mem.imports = Array.isArray(d.imports) ? d.imports : [];
     } else if (id === 'meta') mem.meta = d.byId || {};
     else if (id === 'days') mem.days = d.notes || {};
     else if (/^fills-\d+$/.test(id)) { rows.push(...(d.rows || [])); chunksSaved = Math.max(chunksSaved, +id.slice(6) + 1); }
@@ -107,18 +108,27 @@ function trades() {
   });
   return cache;
 }
-function addFills(list) {
+function addFills(list, batch = '') {
   const known = new Set(mem.fills.map((f) => f.id));
   let added = 0, duplicates = 0;
-  for (const f of list) { if (known.has(f.id)) duplicates++; else { known.add(f.id); mem.fills.push(f); added++; } }
+  for (const f of list) { if (known.has(f.id)) duplicates++; else { known.add(f.id); mem.fills.push({ ...f, batch }); added++; } }
   cache = null;
   return { added, duplicates };
+}
+
+/** Archivos importados con las ejecuciones que conservan, del más reciente al más antiguo. */
+function importList() {
+  const counts = new Map();
+  for (const f of mem.fills) counts.set(f.batch || (f.source === 'csv' ? 'legacy' : ''), (counts.get(f.batch || (f.source === 'csv' ? 'legacy' : '')) || 0) + 1);
+  const out = mem.imports.map((i) => ({ ...i, fills: counts.get(i.id) || 0 })).filter((i) => i.fills > 0).reverse();
+  if (counts.get('legacy')) out.push({ id: 'legacy', name: 'Importaciones anteriores', at: null, added: counts.get('legacy'), fills: counts.get('legacy') });
+  return out;
 }
 
 function state() {
   return {
     settings: { tz: mem.tz, rules: mem.rules, playbooks: mem.playbooks }, instruments: instrumentList(), days: mem.days,
-    sync: { configured: false }, fills: mem.fills.length, passwordProtected: false,
+    sync: { configured: false }, fills: mem.fills.length, passwordProtected: false, imports: importList(),
     features: { shots: false, sync: false, economicConsent: true },
     storageNote: storage === 'db' ? '' : storage === 'local'
       ? 'No se pudo abrir tu espacio de datos en Claude, así que los cambios se guardan solo en este navegador.'
@@ -169,9 +179,10 @@ async function handle(method, url, body = {}) {
     for (const [root, mult] of Object.entries(parsed.derivedMultipliers)) {
       if (!known.has(root) && mult > 0) { mem.instruments[root] = { name: '', multiplier: mult, fee: 0 }; newInstruments.push(root); }
     }
-    const { added, duplicates } = addFills(parsed.fills);
-    if (added) await saveFills();
-    if (newInstruments.length) await saveConfig();
+    const batch = `imp-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const { added, duplicates } = addFills(parsed.fills, batch);
+    if (added) { mem.imports = [...mem.imports, { id: batch, name: String(body.name || 'archivo.csv').slice(0, 200), at: new Date().toISOString(), added }].slice(-200); await saveFills(); }
+    if (added || newInstruments.length) await saveConfig();
     const unknown = [...new Set(trades().filter((t) => t.unknownInstrument).map((t) => t.root))];
     return { format: parsed.format, added, duplicates, warnings: parsed.warnings, newInstruments, unknown, trades: trades().length };
   }
@@ -196,6 +207,30 @@ async function handle(method, url, body = {}) {
     return { ok: true };
   }
 
+  if (p === '/trades/delete' && method === 'POST') {
+    const want = new Set((Array.isArray(body.ids) ? body.ids : []).map(String));
+    if (!want.size) fail('No hay operaciones seleccionadas.');
+    const hit = trades().filter((t) => want.has(t.id));
+    const gone = new Set(hit.flatMap((t) => t.legs.map((l) => l.id)));
+    mem.fills = mem.fills.filter((f) => !gone.has(f.id));
+    for (const t of hit) delete mem.meta[t.id];
+    cache = null;
+    await Promise.all([saveFills(), saveMeta(), saveConfig()]);
+    return { deleted: hit.length };
+  }
+  if ((m = /^\/imports\/([^/]+)$/.exec(p)) && method === 'DELETE') {
+    const id = decodeURIComponent(m[1]);
+    const before = new Set(trades().map((t) => t.id));
+    const n = mem.fills.length;
+    mem.fills = mem.fills.filter((f) => !(id === 'legacy' ? !f.batch && f.source === 'csv' : f.batch === id));
+    mem.imports = mem.imports.filter((i) => i.id !== id);
+    cache = null;
+    const after = new Set(trades().map((t) => t.id));
+    const goneTrades = [...before].filter((x) => !after.has(x));
+    for (const t of goneTrades) delete mem.meta[t];
+    await Promise.all([saveFills(), saveMeta(), saveConfig()]);
+    return { fills: n - mem.fills.length, trades: goneTrades.length };
+  }
   if ((m = /^\/trades\/([^/]+)$/.exec(p)) && method === 'DELETE') {
     const id = decodeURIComponent(m[1]);
     const t = trades().find((x) => x.id === id) || fail('Operación no encontrada.');
@@ -255,7 +290,7 @@ async function handle(method, url, body = {}) {
   // Borra operaciones, notas y playbooks. Los ajustes (zona horaria, instrumentos, reglas) se conservan.
   if (p === '/data' && method === 'DELETE') {
     if (body.confirm !== 'BORRAR') fail('Falta la confirmación.');
-    mem.fills = []; mem.meta = {}; mem.days = {}; mem.playbooks = [];
+    mem.fills = []; mem.meta = {}; mem.days = {}; mem.playbooks = []; mem.imports = [];
     // vuelve a los instrumentos por defecto (conserva las comisiones de esos)
     const keep = new Set(DEFAULT_INSTRUMENTS.map((i) => i[0]));
     mem.instruments = Object.fromEntries(Object.entries(mem.instruments).filter(([root]) => keep.has(root)));

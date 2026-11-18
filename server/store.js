@@ -10,7 +10,7 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS fills (
   id TEXT PRIMARY KEY, account TEXT NOT NULL, contract TEXT NOT NULL,
   side TEXT NOT NULL CHECK (side IN ('B','S')), qty REAL NOT NULL, price REAL NOT NULL,
-  ts TEXT NOT NULL, fee REAL, source TEXT NOT NULL
+  ts TEXT NOT NULL, fee REAL, source TEXT NOT NULL, batch TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS trade_meta (
   trade_id TEXT PRIMARY KEY, notes TEXT NOT NULL DEFAULT '', strategy TEXT NOT NULL DEFAULT '',
@@ -32,6 +32,7 @@ export class Store {
     this.db.exec(SCHEMA);
     // bases creadas antes de los playbooks: añade las columnas que falten
     const cols = new Set(this.db.prepare('PRAGMA table_info(trade_meta)').all().map((c) => c.name));
+    if (!new Set(this.db.prepare('PRAGMA table_info(fills)').all().map((c) => c.name)).has('batch')) this.db.exec("ALTER TABLE fills ADD COLUMN batch TEXT NOT NULL DEFAULT ''");
     if (!cols.has('playbook')) this.db.exec("ALTER TABLE trade_meta ADD COLUMN playbook TEXT NOT NULL DEFAULT ''");
     if (!cols.has('followed')) this.db.exec("ALTER TABLE trade_meta ADD COLUMN followed TEXT NOT NULL DEFAULT '[]'");
     const ins = this.db.prepare('INSERT OR IGNORE INTO instruments (root, name, multiplier, fee) VALUES (?,?,?,0)');
@@ -43,6 +44,7 @@ export class Store {
   settings() {
     const out = { ...DEFAULT_SETTINGS };
     for (const r of this.db.prepare('SELECT key, value FROM settings').all()) out[r.key] = JSON.parse(r.value);
+    delete out.imports;
     out.rules = normalizeRules(out.rules);
     out.playbooks = normalizePlaybooks(out.playbooks);
     return out;
@@ -90,15 +92,15 @@ export class Store {
    * Inserta ejecuciones. Las repetidas (mismo id) se ignoran, salvo con `authoritative`
    * (datos de la API), que actualiza cuenta y comisión real.
    */
-  addFills(fills, { authoritative = false } = {}) {
-    const insert = this.db.prepare(`INSERT OR IGNORE INTO fills (id, account, contract, side, qty, price, ts, fee, source)
-      VALUES (?,?,?,?,?,?,?,?,?)`);
+  addFills(fills, { authoritative = false, batch = '' } = {}) {
+    const insert = this.db.prepare(`INSERT OR IGNORE INTO fills (id, account, contract, side, qty, price, ts, fee, source, batch)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`);
     const update = this.db.prepare('UPDATE fills SET account = ?, fee = COALESCE(?, fee), source = ? WHERE id = ?');
     let added = 0, duplicates = 0;
     this.db.exec('BEGIN');
     try {
       for (const f of fills) {
-        const r = insert.run(f.id, f.account, f.contract, f.side, f.qty, f.price, f.ts, f.fee ?? null, f.source);
+        const r = insert.run(f.id, f.account, f.contract, f.side, f.qty, f.price, f.ts, f.fee ?? null, f.source, batch);
         if (r.changes) added++;
         else { duplicates++; if (authoritative) update.run(f.account, f.fee ?? null, f.source, f.id); }
       }
@@ -106,6 +108,75 @@ export class Store {
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     this.cache = null;
     return { added, duplicates };
+  }
+  // --- archivos importados ---
+  /** Registra un archivo importado y devuelve su id. */
+  recordImport(name, added) {
+    const id = `imp-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const list = this._importLog();
+    list.push({ id, name: String(name || 'archivo.csv').slice(0, 200), at: new Date().toISOString(), added });
+    this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run('imports', JSON.stringify(list.slice(-200)));
+    return id;
+  }
+  _importLog() {
+    const r = this.db.prepare("SELECT value FROM settings WHERE key = 'imports'").get();
+    return r ? JSON.parse(r.value) : [];
+  }
+  /** Archivos importados con las ejecuciones que conservan, del más reciente al más antiguo. */
+  imports() {
+    const counts = new Map(this.db.prepare('SELECT batch, COUNT(*) AS n FROM fills GROUP BY batch').all().map((r) => [r.batch, r.n]));
+    const out = this._importLog().map((i) => ({ ...i, fills: counts.get(i.id) || 0 })).filter((i) => i.fills > 0).reverse();
+    const legacy = this.db.prepare("SELECT COUNT(*) AS n FROM fills WHERE batch = '' AND source = 'csv'").get().n;
+    if (legacy) out.push({ id: 'legacy', name: 'Importaciones anteriores', at: null, added: legacy, fills: legacy });
+    return out;
+  }
+  /** Borra todas las ejecuciones de un archivo importado y las operaciones que dejan de existir. */
+  deleteImport(id) {
+    const before = new Set(this.trades().map((t) => t.id));
+    this.db.exec('BEGIN');
+    let fills;
+    try {
+      fills = id === 'legacy'
+        ? this.db.prepare("DELETE FROM fills WHERE batch = '' AND source = 'csv'").run().changes
+        : this.db.prepare('DELETE FROM fills WHERE batch = ?').run(String(id)).changes;
+      this.db.exec('COMMIT');
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    this.cache = null;
+    const after = new Set(this.trades().map((t) => t.id));
+    const gone = [...before].filter((x) => !after.has(x));
+    const shots = [];
+    const sel = this.db.prepare('SELECT shots FROM trade_meta WHERE trade_id = ?'), del = this.db.prepare('DELETE FROM trade_meta WHERE trade_id = ?');
+    for (const tid of gone) { const r = sel.get(tid); if (r) shots.push(...JSON.parse(r.shots)); del.run(tid); }
+    const log = this._importLog().filter((i) => i.id !== id);
+    this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('imports', JSON.stringify(log));
+    this.cache = null;
+    return { fills, trades: gone.length, shots };
+  }
+
+  /** Borra varias operaciones a la vez con sus ejecuciones y metadatos. Devuelve las capturas a eliminar. */
+  deleteTrades(ids) {
+    const want = new Set((Array.isArray(ids) ? ids : []).map(String));
+    const shots = [];
+    let deleted = 0;
+    const delFill = this.db.prepare('DELETE FROM fills WHERE id = ?'), delMeta = this.db.prepare('DELETE FROM trade_meta WHERE trade_id = ?');
+    this.db.exec('BEGIN');
+    try {
+      for (const t of this.trades()) {
+        if (!want.has(t.id)) continue;
+        for (const fid of new Set(t.legs.map((l) => l.id))) delFill.run(fid);
+        delMeta.run(t.id); shots.push(...t.shots); deleted++;
+      }
+      this.db.exec('COMMIT');
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    this.cache = null;
+    return { deleted, shots };
+  }
+
+  /** Cambia la etiqueta de archivo de las ejecuciones recién insertadas. */
+  relabelBatch(from, to) {
+    this.db.prepare('UPDATE fills SET batch = ? WHERE batch = ?').run(to, from);
+    this.cache = null;
   }
   fillCount() { return this.db.prepare('SELECT COUNT(*) AS n FROM fills').get().n; }
 
@@ -169,7 +240,7 @@ export class Store {
     this.db.exec('BEGIN');
     try {
       this.db.exec('DELETE FROM fills; DELETE FROM trade_meta; DELETE FROM days;');
-      this.db.prepare("DELETE FROM settings WHERE key = 'playbooks'").run();
+      this.db.prepare("DELETE FROM settings WHERE key IN ('playbooks', 'imports')").run();
       const keep = DEFAULT_INSTRUMENTS.map((i) => i[0]);
       this.db.prepare(`DELETE FROM instruments WHERE root NOT IN (${keep.map(() => '?').join(',')})`).run(...keep);
       this.db.exec('COMMIT');

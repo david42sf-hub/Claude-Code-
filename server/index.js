@@ -70,7 +70,7 @@ export function createApp({ dataDir, password = '', tradovate = tradovateConfig(
 
   const state = () => ({
     settings: store.settings(), instruments: store.instruments(), days: store.days(),
-    sync: sync.status, fills: store.fillCount(), passwordProtected: !!password,
+    sync: sync.status, fills: store.fillCount(), passwordProtected: !!password, imports: store.imports(),
   });
 
   async function api(req, res, url) {
@@ -96,14 +96,16 @@ export function createApp({ dataDir, password = '', tradovate = tradovateConfig(
     if (p === '/trades' && m === 'GET') return send(res, 200, store.trades());
 
     if (p === '/import' && m === 'POST') {
-      const { csv, account } = await readBody(req);
+      const { csv, account, name } = await readBody(req);
       if (!csv) throw new HttpError(400, 'Falta el contenido del archivo.');
       let parsed;
       try {
         parsed = parseTradovateCsv(csv, { tz: store.settings().tz, account: String(account || '').trim() || 'Tradovate' });
       } catch (e) { throw new HttpError(400, e.message); }
       const newInstruments = store.addMissingInstruments(parsed.derivedMultipliers);
-      const { added, duplicates } = store.addFills(parsed.fills);
+      const { added, duplicates } = store.addFills(parsed.fills, { batch: 'pending' });
+      if (added) { const id = store.recordImport(name, added); store.relabelBatch('pending', id); }
+      else store.relabelBatch('pending', '');
       const unknown = [...new Set(store.trades().filter((t) => t.unknownInstrument).map((t) => t.root))];
       return send(res, 200, {
         format: parsed.format, added, duplicates, warnings: parsed.warnings, newInstruments, unknown,
@@ -132,7 +134,20 @@ export function createApp({ dataDir, password = '', tradovate = tradovateConfig(
       return send(res, 201, { ok: true });
     }
 
+    if (p === '/trades/delete' && m === 'POST') {
+      const { ids } = await readBody(req);
+      if (!Array.isArray(ids) || !ids.length) throw new HttpError(400, 'No hay operaciones seleccionadas.');
+      const r = store.deleteTrades(ids);
+      for (const s of r.shots) fs.rmSync(path.join(uploadsDir, path.basename(s)), { force: true });
+      return send(res, 200, { deleted: r.deleted });
+    }
+
     let mm;
+    if ((mm = /^\/imports\/([^/]+)$/.exec(p)) && m === 'DELETE') {
+      const r = store.deleteImport(decodeURIComponent(mm[1]));
+      for (const s of r.shots) fs.rmSync(path.join(uploadsDir, path.basename(s)), { force: true });
+      return send(res, 200, { fills: r.fills, trades: r.trades });
+    }
     if ((mm = /^\/trades\/([^/]+)$/.exec(p)) && m === 'DELETE') {
       const t = store.deleteTrade(decodeURIComponent(mm[1]));
       for (const s of t.shots) fs.rmSync(path.join(uploadsDir, path.basename(s)), { force: true });
