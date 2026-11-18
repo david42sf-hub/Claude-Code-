@@ -1,4 +1,5 @@
 import { summarize, groupStats, rMultiple, durationBucket, DURATION_BUCKETS, weekday } from '/lib/stats.js';
+import { evaluateRules, behavioralInsights, normalizeRules, RULE_LABELS, KIND_LABELS } from '/lib/insights.js';
 import { lineChart, columnChart, hbarChart, hideTip } from '/charts.js';
 
 // ---------- utilidades ----------
@@ -100,7 +101,7 @@ function filterBar() {
 
 // ---------- estructura ----------
 const VIEWS = [
-  ['panel', 'Panel'], ['operaciones', 'Operaciones'], ['diario', 'Diario'], ['reportes', 'Reportes'], ['importar', 'Importar'], ['ajustes', 'Ajustes'],
+  ['panel', 'Panel'], ['operaciones', 'Operaciones'], ['diario', 'Diario'], ['disciplina', 'Disciplina'], ['reportes', 'Reportes'], ['importar', 'Importar'], ['ajustes', 'Ajustes'],
 ];
 const LOGO = `<svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1c5cab"/><path d="M6 21l6-7 5 4 9-10" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const view = () => { const v = location.hash.replace(/^#\/?/, '').split('/')[0]; return VIEWS.some(([k]) => k === v) ? v : 'panel'; };
@@ -119,7 +120,7 @@ function render() {
   if (!S.state) { app.innerHTML = '<div class="empty">Cargando…</div>'; return; }
   const v = view();
   const title = VIEWS.find(([k]) => k === v)[1];
-  const showFilters = ['panel', 'operaciones', 'diario', 'reportes'].includes(v) && S.trades.length;
+  const showFilters = ['panel', 'operaciones', 'diario', 'disciplina', 'reportes'].includes(v) && S.trades.length;
   app.innerHTML = `<div class="shell">
     <aside class="side">
       <div class="brand">${LOGO}<span>Diario de trading</span></div>
@@ -136,7 +137,7 @@ function render() {
     </main></div>
     <dialog class="drawer" id="drawer"></dialog>`;
   const el = $('#view');
-  ({ panel: viewPanel, operaciones: viewTrades, diario: viewDiary, reportes: viewReports, importar: viewImport, ajustes: viewSettings })[v](el);
+  ({ panel: viewPanel, operaciones: viewTrades, diario: viewDiary, disciplina: viewDiscipline, reportes: viewReports, importar: viewImport, ajustes: viewSettings })[v](el);
   if (S.openId) openDrawer(S.openId);
 }
 
@@ -360,6 +361,84 @@ function viewDiary(el) {
   }).join('')}${days.length > 60 ? '<div class="muted" style="text-align:center">Se muestran los 60 días más recientes del filtro.</div>' : ''}</div>`;
 }
 
+// ---------- disciplina ----------
+const SEVERITY = { negative: ['Alerta', 'short'], neutral: ['Aviso', ''], positive: ['Bien hecho', 'long'] };
+function rulesForm(rules) {
+  const on = (k) => (rules[k].on ? 'checked' : '');
+  const num = (k, f, step = 'any') => `<input type="number" min="0" step="${step}" name="${k}_${f}" value="${rules[k][f]}" style="width:90px" aria-label="${esc(RULE_LABELS[k])}: ${f}">`;
+  return `<form data-form="rules" class="stack">
+    <div class="stack" style="gap:10px">
+      <label class="row"><input type="checkbox" name="hours_on" ${on('hours')}> <span style="min-width:210px">${RULE_LABELS.hours}</span>
+        <input type="time" name="hours_from" value="${rules.hours.from}" aria-label="Desde"> a <input type="time" name="hours_to" value="${rules.hours.to}" aria-label="Hasta"></label>
+      <label class="row"><input type="checkbox" name="pause_on" ${on('pause')}> <span style="min-width:210px">${RULE_LABELS.pause}</span>
+        tras ${num('pause', 'losses', 1)} seguidas, esperar ${num('pause', 'minutes')} min</label>
+      <label class="row"><input type="checkbox" name="maxLossDay_on" ${on('maxLossDay')}> <span style="min-width:210px">${RULE_LABELS.maxLossDay}</span> $ ${num('maxLossDay', 'value')}</label>
+      <label class="row"><input type="checkbox" name="maxLossTrade_on" ${on('maxLossTrade')}> <span style="min-width:210px">${RULE_LABELS.maxLossTrade}</span> $ ${num('maxLossTrade', 'value')}</label>
+      <label class="row"><input type="checkbox" name="maxTradesDay_on" ${on('maxTradesDay')}> <span style="min-width:210px">${RULE_LABELS.maxTradesDay}</span> ${num('maxTradesDay', 'value', 1)}</label>
+    </div><div><button class="btn primary">Guardar reglas</button></div></form>`;
+}
+function rulesFromForm(data) {
+  const f = (k) => data[k];
+  return normalizeRules({
+    hours: { on: 'hours_on' in data, from: f('hours_from'), to: f('hours_to') },
+    pause: { on: 'pause_on' in data, losses: f('pause_losses'), minutes: f('pause_minutes') },
+    maxLossDay: { on: 'maxLossDay_on' in data, value: f('maxLossDay_value') },
+    maxLossTrade: { on: 'maxLossTrade_on' in data, value: f('maxLossTrade_value') },
+    maxTradesDay: { on: 'maxTradesDay_on' in data, value: f('maxTradesDay_value') },
+  });
+}
+function viewDiscipline(el) {
+  if (!S.trades.length) { el.innerHTML = emptyState(); return; }
+  const [from, to] = rangeBounds();
+  const everything = filtered({ ignoreRange: true }).filter((t) => t.status === 'closed');
+  const list = everything.filter((t) => t.day >= from && t.day <= to);
+  const rulesCard = `<div class="card"><h2>Mis reglas <small>se comprueban solas con cada operación</small></h2>${rulesForm(S.state.settings.rules)}</div>`;
+  if (!list.length) { el.innerHTML = noMatch() + rulesCard; return; }
+
+  const ev = evaluateRules(list, S.state.settings.rules, tz());
+  const insights = behavioralInsights(everything).filter((i) => i.day >= from && i.day <= to);
+  const st = ev.stats;
+  const byId = new Map(list.map((t) => [t.id, t]));
+  const broken = [...ev.perTrade].map(([id, keys]) => ({ t: byId.get(id), keys })).filter((x) => x.t)
+    .sort((a, b) => (a.t.exitTs < b.t.exitTs ? 1 : -1));
+
+  const kpis = ev.active.length ? `<div class="grid kpis">
+    ${kpi('Días que cumpliste tus reglas', pct(st.okRate), `${st.okDays} de ${st.days} días`)}
+    ${kpi('Operaciones que rompieron reglas', String(st.broke.count), `de ${st.broke.count + st.followed.count} operaciones`)}
+    ${kpi('Resultado rompiendo reglas', `<span class="${cls(st.broke.net)}">${money(st.broke.net)}</span>`, st.broke.count ? `${money(st.broke.expectancy)} por operación` : 'sin operaciones')}
+    ${kpi('Resultado cumpliendo reglas', `<span class="${cls(st.followed.net)}">${money(st.followed.net)}</span>`, st.followed.count ? `${money(st.followed.expectancy)} por operación` : 'sin operaciones')}
+  </div>` : '<div class="notice">No tienes reglas activas. Actívalas abajo para ver cuántos días las cumples y cuánto te cuesta romperlas.</div>';
+
+  const dayRows = ev.days.slice(-30).reverse().map((d) => `<tr>
+    <td>${fmtDay(d.day)}</td><td class="r num">${d.count}</td><td class="r num ${cls(d.net)}"><b>${money(d.net)}</b></td>
+    ${ev.active.map((k) => `<td>${d.failed.includes(k) ? '<span class="down">✕ Rota</span>' : '<span class="up">✓ Cumplida</span>'}</td>`).join('')}</tr>`).join('');
+
+  const byKind = new Map();
+  for (const i of insights) { const g = byKind.get(i.kind) || { n: 0, cost: 0 }; g.n++; g.cost += i.impact; byKind.set(i.kind, g); }
+  const patterns = [...byKind].filter(([k]) => k !== 'perfect_day').sort((a, b) => a[1].cost - b[1].cost);
+  const shown = insights.slice(0, 40);
+
+  el.innerHTML = `<div class="stack">${kpis}
+    ${patterns.length ? `<div class="card"><h2>Patrones que te cuestan dinero <small>resultado de las operaciones afectadas</small></h2><div id="c-patterns"></div></div>` : ''}
+    <div class="card"><h2>Insights de comportamiento <small>${insights.length} en este periodo</small></h2>
+      ${shown.length ? `<div class="table-wrap"><table><tbody>${shown.map((i) => `<tr class="${i.tradeId ? 'click' : ''}" ${i.tradeId ? `data-action="open" data-id="${esc(i.tradeId)}" tabindex="0"` : ''}>
+        <td style="white-space:normal;min-width:260px"><span class="pill ${SEVERITY[i.severity][1]}">${SEVERITY[i.severity][0]}</span> <b>${esc(KIND_LABELS[i.kind])}</b> <span class="muted">· ${fmtDay(i.day)}</span><br><span class="muted">${esc(i.text)}</span></td>
+        <td class="r num ${cls(i.impact)}"><b>${money(i.impact)}</b></td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="empty" style="padding:20px">Sin patrones detectados en este periodo. Se necesitan al menos 5 días operados para comparar tu actividad.</div>'}
+      ${insights.length > shown.length ? `<p class="muted" style="margin-bottom:0">Se muestran los 40 más recientes.</p>` : ''}</div>
+    ${ev.active.length ? `<div class="card"><h2>Reglas día a día <small>últimos ${Math.min(30, ev.days.length)} días operados</small></h2><div class="table-wrap"><table><thead><tr><th>Día</th><th class="r">Op.</th><th class="r">Neto</th>${ev.active.map((k) => `<th>${esc(RULE_LABELS[k])}</th>`).join('')}</tr></thead><tbody>${dayRows}</tbody></table></div></div>` : ''}
+    ${broken.length ? `<div class="card"><h2>Operaciones que rompieron reglas <small>${broken.length}</small></h2><div class="table-wrap"><table><tbody>${broken.slice(0, 15).map(({ t, keys }) => `<tr class="click" data-action="open" data-id="${esc(t.id)}" tabindex="0">
+      <td class="num">${fmtTime(t.exitTs || t.entryTs)}</td><td>${esc(t.contract)}</td><td>${keys.map((k) => `<span class="pill short">${esc(RULE_LABELS[k])}</span>`).join(' ')}</td>
+      <td class="r num ${cls(t.net)}"><b>${money(t.net)}</b></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+    ${rulesCard}</div>`;
+  if (patterns.length) {
+    hbarChart($('#c-patterns'), patterns.map(([k, g]) => ({
+      label: KIND_LABELS[k], value: g.cost, text: money(g.cost),
+      tip: `<b class="num">${money(g.cost)}</b>${esc(KIND_LABELS[k])}<br>${g.n} vez/veces en este periodo`,
+    })));
+  }
+}
+
 // ---------- reportes ----------
 const REPORTS = {
   symbol: ['Símbolo', (t) => t.root],
@@ -546,6 +625,9 @@ document.addEventListener('submit', guard(async (ev) => {
   if (form.dataset.form === 'login') {
     try { await api('POST', '/api/login', data); } catch (e) { toast(e.message); return; }
     await reload();
+  } else if (form.dataset.form === 'rules') {
+    S.state = await api('PUT', '/api/settings', { rules: rulesFromForm(data) });
+    toast('Reglas guardadas.'); render();
   } else if (form.dataset.form === 'manual') {
     await api('POST', '/api/trades', data);
     toast('Operación guardada.'); S.calMonth = null; await reload();

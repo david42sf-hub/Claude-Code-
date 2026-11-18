@@ -79,6 +79,19 @@ test('importar, anotar, reimportar sin duplicar y borrar', async () => {
   } finally { app.close(); }
 });
 
+test('las reglas de disciplina se guardan, se sanean y tienen valores por defecto', async () => {
+  const app = await boot();
+  try {
+    let r = await app.call('GET', '/api/state');
+    assert.deepEqual([r.body.settings.rules.hours.on, r.body.settings.rules.pause.minutes, r.body.settings.rules.maxLossDay.on], [true, 5, false]);
+    r = await app.call('PUT', '/api/settings', { rules: { maxLossDay: { on: true, value: '250' }, hours: { from: '99:99' } } });
+    assert.equal(r.status, 200);
+    assert.deepEqual([r.body.settings.rules.maxLossDay, r.body.settings.rules.hours.from], [{ on: true, value: 250 }, '09:30']);
+    assert.equal((await app.call('GET', '/api/state')).body.settings.rules.maxLossDay.value, 250);
+    assert.equal((await app.call('GET', '/api/state')).body.settings.tz, 'America/New_York');
+  } finally { app.close(); }
+});
+
 test('archivos estáticos sin salir de la carpeta pública', async () => {
   const app = await boot();
   try {

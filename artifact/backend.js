@@ -4,11 +4,12 @@ import { parseTradovateCsv } from './csv.js';
 import { buildTrades } from './engine.js';
 import { parseTimestamp, isValidTz } from './time.js';
 import { DEFAULT_INSTRUMENTS } from './instruments.js';
+import { normalizeRules } from './insights.js';
 
 const CHUNK = 1200;
 const LS_KEY = 'diario-de-trading';
 
-const mem = { tz: 'America/New_York', instruments: {}, fills: [], meta: {}, days: {} };
+const mem = { tz: 'America/New_York', rules: normalizeRules(), instruments: {}, fills: [], meta: {}, days: {} };
 let example = [];          // ejecuciones de ejemplo (nunca se guardan)
 let exampleMeta = {};
 let col = null;            // colección privada del usuario en la base de datos
@@ -40,7 +41,7 @@ function write(id, body) {
   queues.set(id, next);
   return next;
 }
-const saveConfig = () => write('config', { tz: mem.tz, instruments: mem.instruments });
+const saveConfig = () => write('config', { tz: mem.tz, rules: mem.rules, instruments: mem.instruments });
 const saveMeta = () => write('meta', { byId: mem.meta });
 const saveDays = () => write('days', { notes: mem.days });
 async function saveFills() {
@@ -56,7 +57,7 @@ async function saveFills() {
 function absorb(docs) {
   const rows = [];
   for (const [id, d] of docs) {
-    if (id === 'config') { if (isValidTz(d.tz)) mem.tz = d.tz; mem.instruments = d.instruments || {}; }
+    if (id === 'config') { if (isValidTz(d.tz)) mem.tz = d.tz; mem.rules = normalizeRules(d.rules); mem.instruments = d.instruments || {}; }
     else if (id === 'meta') mem.meta = d.byId || {};
     else if (id === 'days') mem.days = d.notes || {};
     else if (/^fills-\d+$/.test(id)) { rows.push(...(d.rows || [])); chunksSaved = Math.max(chunksSaved, +id.slice(6) + 1); }
@@ -81,7 +82,7 @@ async function init() {
   if (storage === 'none') {
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (raw) { const d = JSON.parse(raw); Object.assign(mem, d, { fills: (d.fills || []).map(unpackFill) }); }
+      if (raw) { const d = JSON.parse(raw); Object.assign(mem, d, { fills: (d.fills || []).map(unpackFill), rules: normalizeRules(d.rules) }); }
       localStorage.setItem(`${LS_KEY}-probe`, '1');
       storage = 'local';
     } catch { storage = 'none'; }
@@ -154,7 +155,7 @@ function addFills(list) {
 
 function state() {
   return {
-    settings: { tz: mem.tz }, instruments: instrumentList(), days: usingExample() ? {} : mem.days,
+    settings: { tz: mem.tz, rules: mem.rules }, instruments: instrumentList(), days: usingExample() ? {} : mem.days,
     sync: { configured: false }, fills: mem.fills.length, passwordProtected: false, example: usingExample(),
     features: { shots: false, sync: false },
     storageNote: storage === 'db' ? '' : storage === 'local'
@@ -244,8 +245,11 @@ async function handle(method, url, body = {}) {
     return { ok: true };
   }
   if (p === '/settings' && method === 'PUT') {
-    if (!isValidTz(body.tz)) fail('Zona horaria no válida.');
-    mem.tz = body.tz; cache = null;
+    if (body.tz !== undefined) {
+      if (!isValidTz(body.tz)) fail('Zona horaria no válida.');
+      mem.tz = body.tz; cache = null;
+    }
+    if (body.rules !== undefined) mem.rules = normalizeRules(body.rules);
     await saveConfig();
     return state();
   }

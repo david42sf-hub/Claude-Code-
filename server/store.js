@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_INSTRUMENTS, rootOf } from './instruments.js';
 import { buildTrades } from './engine.js';
 import { isValidTz } from './time.js';
+import { normalizeRules } from '../public/lib/insights.js';
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -37,14 +38,16 @@ export class Store {
   settings() {
     const out = { ...DEFAULT_SETTINGS };
     for (const r of this.db.prepare('SELECT key, value FROM settings').all()) out[r.key] = JSON.parse(r.value);
+    out.rules = normalizeRules(out.rules);
     return out;
   }
   setSettings(patch) {
+    const put = this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
     if (patch.tz !== undefined) {
       if (!isValidTz(patch.tz)) throw new Error('Zona horaria no válida.');
-      this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-        .run('tz', JSON.stringify(patch.tz));
+      put.run('tz', JSON.stringify(patch.tz));
     }
+    if (patch.rules !== undefined) put.run('rules', JSON.stringify(normalizeRules(patch.rules)));
     this.cache = null;
   }
 

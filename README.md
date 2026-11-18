@@ -7,6 +7,7 @@ Diario de trading personal para futuros operados en Tradovate: registra tus oper
 - **Panel**: resultado neto, tasa de acierto, factor de beneficio, expectativa, drawdown máximo, curva de capital, resultado por día y calendario mensual.
 - **Operaciones**: tabla ordenable y filtrable; cada operación tiene estrategia, etiquetas, errores, notas, precio de stop (para el R múltiple), capturas de pantalla y el detalle de sus ejecuciones.
 - **Diario**: notas por día junto a las operaciones de esa jornada.
+- **Disciplina**: tus reglas (horario, pausa tras pérdidas seguidas, pérdida máxima por día y por operación, máximo de operaciones) se comprueban solas; muestra qué días las cumpliste, cuánto te costó romperlas y detecta patrones de comportamiento (sobreoperación, venganza, sobreconfianza, pérdidas aguantadas de más, días perfectos).
 - **Reportes**: resultado por símbolo, día de la semana, hora de entrada, duración, lado, estrategia, etiqueta y error.
 - **Importar**: CSV de Tradovate (reportes *Performance* y *Fills*) y operaciones manuales. Reimportar no duplica nada.
 - **Sincronización automática** con la API de Tradovate (solo lectura).
