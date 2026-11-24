@@ -140,6 +140,7 @@ function render() {
     </aside>
     <main class="main">
       <div class="top"><h1>${title}</h1>${showFilters ? filterBar() : ''}</div>
+      ${S.state.demo ? '<div class="notice" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between"><span><b>Estás viendo datos de ejemplo.</b> Son ficticios y nada de lo que hagas aquí se guarda. Tus datos reales no se han tocado.</span><button class="btn small primary" data-action="demo-off">Salir y volver a mis datos</button></div>' : ''}
       ${S.state.storageNote ? `<div class="notice warn">${esc(S.state.storageNote)}</div>` : ''}
       <div id="view"></div>
     </main></div>
@@ -158,7 +159,8 @@ function loginView() {
 
 const emptyState = () => `<div class="card empty"><strong>Todavía no hay operaciones</strong>
   Importa el reporte de Tradovate o registra una operación manual para ver tus métricas.
-  <div style="margin-top:14px"><a class="btn primary" href="#importar" style="text-decoration:none">Importar operaciones</a></div></div>`;
+  <div class="row" style="margin-top:14px;justify-content:center"><a class="btn primary" href="#importar" style="text-decoration:none">Importar operaciones</a>
+    ${S.state?.features?.demo ? '<button class="btn" data-action="demo-on">Ver con datos de ejemplo</button>' : ''}</div></div>`;
 const noMatch = () => '<div class="card empty"><strong>Sin operaciones en este filtro</strong>Cambia el periodo o los filtros para ver resultados.</div>';
 
 // ---------- panel ----------
@@ -215,7 +217,7 @@ const shortMoney = (v) => {
   const body = a >= 10000 ? `${Math.round(a / 1000)}K` : a >= 1000 ? `${(a / 1000).toFixed(1)}K` : `${Math.round(a)}`;
   return `${v < 0 ? '−' : v > 0 ? '+' : ''}$${body}`;
 };
-const calPnl = (v) => `<span class="pnl num"><span class="full">${money(v)}</span><span class="short">${shortMoney(v)}</span></span>`;
+const calPnl = (v) => `<span class="pnl num"><span class="full">${Math.abs(v) >= 1000 ? shortMoney(v) : money(v)}</span><span class="short">${shortMoney(v)}</span></span>`;
 function calendarCard() {
   const days = new Map(summarize(filtered({ ignoreRange: true })).days.map((d) => [d.day, d]));
   if (!S.calMonth) {
@@ -648,7 +650,10 @@ function viewSettings(el) {
           <button class="btn" data-action="calib">Calcular</button></div>
         <div class="muted num" style="margin-top:8px">${withTrades.map((i) => `${esc(i.root)}: bruto ${money(used[i.root].gross)}`).join(' · ')} · total ${money(withTrades.reduce((a, i) => a + used[i.root].gross, 0))}</div></div>` : ''}</div>
     <div class="card"><h2>Datos</h2><p class="muted" style="margin-top:0">${S.state.dataNote ? esc(S.state.dataNote) : `${S.state.fills} ejecuciones guardadas en <code>data/diario.db</code> (SQLite) y capturas en <code>data/uploads</code>. Haz copia de la carpeta <code>data</code> para respaldar todo.`}</p>
-      <div class="row" style="margin-top:12px"><button class="btn danger" data-action="wipe">Borrar todos los datos</button>
+      ${S.state.features?.demo ? `<div class="row" style="margin-top:12px">${S.state.demo
+        ? '<button class="btn primary" data-action="demo-off">Salir de los datos de ejemplo</button><span class="muted">Estás viendo datos ficticios; no se guardan.</span>'
+        : '<button class="btn" data-action="demo-on">Ver con datos de ejemplo</button><span class="muted">Carga datos ficticios solo en pantalla para recorrer la app. No se guardan ni tocan tus datos.</span>'}</div>` : ''}
+      <div class="row" style="margin-top:12px" ${S.state.demo ? 'hidden' : ''}><button class="btn danger" data-action="wipe">Borrar todos los datos</button>
         <span class="muted">Elimina operaciones, notas, capturas, playbooks y los instrumentos detectados al importar. Conserva la zona horaria, tus reglas y las comisiones de NQ y MNQ.</span></div></div></div>`;
 }
 
@@ -1032,6 +1037,14 @@ document.addEventListener('click', guard(async (ev) => {
   else if (a === 'ai-prompt') { await sendAi(el.dataset.q); }
   else if (a === 'ai-stop') { S.ai.ctl?.abort(); }
   else if (a === 'ai-clear') { ev.preventDefault(); S.ai.messages = []; render(); }
+  else if (a === 'demo-on' || a === 'demo-off') {
+    S.state = await api('POST', '/api/demo', { on: a === 'demo-on' });
+    S.trades = await api('GET', '/api/trades');
+    S.sel.clear(); S.openId = null; S.pbSel = null; S.pbDraft = null; S.pbNew = false; S.calMonth = null;
+    S.filter = { range: 'all', from: '', to: '', account: '', symbol: '', side: '' };
+    toast(a === 'demo-on' ? 'Datos de ejemplo cargados. Nada se guarda.' : 'Has vuelto a tus datos.');
+    if (location.hash === '#panel') render(); else location.hash = '#panel';
+  }
   else if (a === 'wipe') {
     if (!armed(el, 'Confirmar: borrar todo, no se puede deshacer')) return;
     S.state = await api('DELETE', '/api/data', { confirm: 'BORRAR' });

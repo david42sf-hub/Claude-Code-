@@ -7,6 +7,7 @@ import { parseTimestamp, isValidTz } from '../server/time.js';
 import { DEFAULT_INSTRUMENTS } from '../server/instruments.js';
 import { normalizeRules } from '../public/lib/insights.js';
 import { normalizePlaybooks } from '../public/lib/playbooks.js';
+import { makeDemo } from './demo.js';
 
 const CHUNK = 1200;
 const LS_KEY = 'diario-de-trading';
@@ -30,7 +31,26 @@ function instrumentList() {
 
 // ---------- guardado ----------
 const queues = new Map();
+// Modo ejemplo: los datos ficticios viven solo en memoria. Nada se guarda y al salir se restauran los reales.
+let demo = false, snapshot = null;
+function enterDemo() {
+  if (demo) return;
+  snapshot = { mem: structuredClone(mem), chunksSaved };
+  const d = makeDemo(new Date(), mem.tz);
+  Object.assign(mem, {
+    fills: d.fills, meta: d.meta, days: d.days, playbooks: normalizePlaybooks(d.playbooks), instruments: d.instruments,
+    imports: [{ id: 'demo', name: 'Datos de ejemplo', at: new Date().toISOString(), added: d.fills.length }],
+    feeMode: 'round', rules: normalizeRules(),
+  });
+  demo = true; cache = null;
+}
+function exitDemo() {
+  if (!demo) return;
+  Object.assign(mem, snapshot.mem);
+  chunksSaved = snapshot.chunksSaved; snapshot = null; demo = false; cache = null;
+}
 function write(id, body) {
+  if (demo) return Promise.resolve();
   if (storage === 'local') {
     try { localStorage.setItem(LS_KEY, JSON.stringify({ ...mem, fills: mem.fills.map(packFill) })); } catch { /* sin almacenamiento */ }
     return Promise.resolve();
@@ -132,7 +152,7 @@ function state() {
   return {
     settings: { tz: mem.tz, feeMode: mem.feeMode === 'side' ? 'side' : 'round', rules: mem.rules, playbooks: mem.playbooks }, instruments: instrumentList(), days: mem.days,
     sync: { configured: false }, fills: mem.fills.length, passwordProtected: false, imports: importList(),
-    features: { shots: false, sync: false, economicConsent: true },
+    demo, features: { shots: false, sync: false, economicConsent: true, demo: true },
     storageNote: storage === 'db' ? '' : storage === 'local'
       ? 'No se pudo abrir tu espacio de datos en Claude, así que los cambios se guardan solo en este navegador.'
       : 'No hay dónde guardar en esta vista: los cambios se perderán al cerrar la página.',
@@ -174,6 +194,7 @@ async function handle(method, url, body = {}) {
   if (p === '/state' && method === 'GET') return state();
   if (p === '/trades' && method === 'GET') return trades();
   if (p === '/economic' && method === 'GET') return economic(new URLSearchParams(qs || ''));
+  if (p === '/demo' && method === 'POST') { if (body.on) enterDemo(); else exitDemo(); return state(); }
 
   if (p === '/import' && method === 'POST') {
     const parsed = parseTradovateCsv(body.csv || '', { tz: mem.tz, account: String(body.account || '').trim() || 'Tradovate' });

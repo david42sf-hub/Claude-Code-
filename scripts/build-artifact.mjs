@@ -11,7 +11,7 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 // Orden de dependencias: cada módulo se envuelve en una función y expone sus exportaciones.
 const MODULES = [
   'server/time.js', 'server/instruments.js', 'server/csv.js', 'server/economic.js', 'server/engine.js',
-  'public/lib/stats.js', 'public/lib/insights.js', 'public/lib/playbooks.js', 'public/lib/news.js', 'public/charts.js', 'artifact/backend.js', 'artifact/assistant.js', 'public/app.js',
+  'public/lib/stats.js', 'public/lib/insights.js', 'public/lib/playbooks.js', 'public/lib/news.js', 'public/charts.js', 'artifact/demo.js', 'artifact/backend.js', 'artifact/assistant.js', 'public/app.js',
 ];
 
 function wrap(file) {

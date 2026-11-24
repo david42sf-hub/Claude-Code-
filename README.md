@@ -69,6 +69,10 @@ Para que sincronice sin tener tu computadora encendida, despliégala en un servi
 
 Al publicarla con Claude se declaran los permisos `db`, `user`, `sample` y `mcp` (conector de Tradezella, solo las herramientas `get_market_data` y `get_economic_calendar`). Esas consultas envían símbolo, fechas e impacto; nunca operaciones, notas ni playbooks. En la versión con servidor, el calendario usa un feed público gratuito de la semana en curso y el asistente no está disponible.
 
+## Datos de ejemplo
+
+En la versión de una página, **Ajustes → Ver con datos de ejemplo** (o el botón del estado vacío) carga datos ficticios solo en memoria: dos playbooks, notas, días de sobreoperación y de venganza, operaciones fuera de horario y un día perfecto. Nada se guarda, tus datos reales no se tocan y **Salir y volver a mis datos** los restaura.
+
 ## Borrar operaciones
 
 - En **Operaciones** marca varias casillas (o **Seleccionar las N del filtro**) y pulsa **Eliminar seleccionadas**. Combínalo con el filtro de periodo para borrar un día o un mes entero.
